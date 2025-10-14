@@ -33,41 +33,16 @@ interface CurrentLine {
   nodeIds: number[];
 }
 
-type ViewMode = "3d" | "map";
-type Mode = "view" | "drawLines" | "dragNodes" | "dragBuildings" | "imageEdit";
+interface Point {
+  lng: number;
+  lat: number;
+}
 
-const buildingsData: Building[] = [
-  {
-    height: 137,
-    polygon: [
-      [-74.01766, 40.70552],
-      [-74.01752, 40.70572],
-      [-74.01745, 40.70569],
-      [-74.01732, 40.70563],
-      [-74.01736, 40.7055],
-      [-74.01752, 40.70549],
-      [-74.0176, 40.70549],
-      [-74.01767, 40.7055],
-      [-74.01766, 40.70552],
-    ],
-  },
-  {
-    height: 29,
-    polygon: [
-      [-74.01852, 40.70652],
-      [-74.0184, 40.70668],
-      [-74.0182, 40.7066],
-      [-74.01806, 40.70674],
-      [-74.01829, 40.70683],
-      [-74.01818, 40.70699],
-      [-74.01773, 40.70682],
-      [-74.01782, 40.7067],
-      [-74.01795, 40.70652],
-      [-74.01808, 40.70634],
-      [-74.01852, 40.70652],
-    ],
-  },
-];
+type ViewMode = "3d" | "map";
+type Mode = "view" | "drawLines" | "dragNodes" | "imageEdit" | "drawBuildings";
+
+// Initial buildings data
+const initialBuildingsData: Building[] = [];
 
 export default function App() {
   const mapContainer = useRef<HTMLDivElement>(null);
@@ -75,6 +50,7 @@ export default function App() {
   const [viewMode, setViewMode] = useState<ViewMode>("map");
   const [mode, setMode] = useState<Mode>("view");
 
+  // Road drawing state
   const [lines, setLines] = useState<Line[]>([]);
   const [currentLine, setCurrentLine] = useState<CurrentLine | null>(null);
   const [nodes, setNodes] = useState<Node[]>([]);
@@ -82,14 +58,19 @@ export default function App() {
   const isDraggingNode = useRef(false);
   const lastClickTime = useRef<number>(0);
 
-  // Image manipulation state
+  // Building drawing state
+  const [buildings, setBuildings] = useState<Building[]>(initialBuildingsData);
+  const [drawingPoints, setDrawingPoints] = useState<Point[]>([]);
+  const [currentHeight, setCurrentHeight] = useState<number>(30);
+  const [measurement, setMeasurement] = useState<string>('');
+  const [showBuildingPanel, setShowBuildingPanel] = useState(true);
+  const [showCode, setShowCode] = useState(false);
+
+  // Image upload and manipulation state
+  // const [uploadedImage, setUploadedImage] = useState<string | null>(null);
+  const uploadedImageRef = useRef<string | null>(null);
+  const [imageSize, setImageSize] = useState<{ width: number; height: number } | null>(null);
   const imageBoundsRef = useRef<[number, number][]>([
-    // [77.58, 12.94],
-    // [77.60, 12.94],
-    // [77.60, 12.92],
-    // [77.58, 12.92],
-
-
     [-74.0185, 40.7064],
     [-74.0173, 40.7064],
     [-74.0173, 40.7056],
@@ -97,11 +78,17 @@ export default function App() {
   ]);
   const imageId = 'custom-image-layer';
 
+  // Drawing layer IDs
+  const drawingSourceId = 'drawing-source';
+  const drawingPointsSourceId = 'drawing-points-source';
+  const buildingsSourceId = 'buildings-source';
+
   // Refs for current state
   const linesRef = useRef<Line[]>([]);
   const nodesRef = useRef<Node[]>([]);
   const modeRef = useRef<Mode>(mode);
   const currentLineRef = useRef<CurrentLine | null>(null);
+  const buildingsRef = useRef<Building[]>(buildings);
 
   const colors = ["#FF9800"];
 
@@ -121,6 +108,349 @@ export default function App() {
   useEffect(() => {
     modeRef.current = mode;
   }, [mode]);
+
+  useEffect(() => {
+    buildingsRef.current = buildings;
+  }, [buildings]);
+
+  // Image upload handler
+  const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    // Check if file is an image
+    if (!file.type.startsWith('image/')) {
+      alert('Please upload an image file');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const imageUrl = e.target?.result as string;
+      
+      // Create a temporary image to get dimensions
+      const img = new Image();
+      img.onload = () => {
+        console.log(imageUrl,e);
+        uploadedImageRef.current = imageUrl;
+        setImageSize({ width: img.width, height: img.height });
+        
+        // Calculate bounds based on image aspect ratio and center of map
+        if (mapRef.current) {
+          const center = mapRef.current.getCenter();
+          const zoom = mapRef.current.getZoom();
+          calculateImageBounds(center.lng, center.lat, img.width, img.height, zoom);
+        }
+      };
+      img.src = imageUrl;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Calculate image bounds based on center, image dimensions, and zoom level
+  const calculateImageBounds = (centerLng: number, centerLat: number, imgWidth: number, imgHeight: number, zoom: number) => {
+    // Calculate the scale factor based on zoom level
+    const scale = Math.pow(2, 17 - zoom); // Adjust this factor as needed
+    
+    // Calculate the dimensions in degrees (approximate conversion)
+    // This is a simplified calculation - you might need to adjust based on your needs
+    const widthDegrees = (imgWidth / 100000) * scale;
+    const heightDegrees = (imgHeight / 100000) * scale;
+    
+    // Maintain aspect ratio
+    const aspectRatio = imgWidth / imgHeight;
+    let finalWidth = widthDegrees;
+    let finalHeight = heightDegrees;
+    
+    if (aspectRatio > 1) {
+      // Wider than tall
+      finalHeight = finalWidth / aspectRatio;
+    } else {
+      // Taller than wide
+      finalWidth = finalHeight * aspectRatio;
+    }
+    
+    // Calculate bounds
+    const halfWidth = finalWidth / 2;
+    const halfHeight = finalHeight / 2;
+    
+    const newBounds: [number, number][] = [
+      [centerLng - halfWidth, centerLat + halfHeight], // top-left
+      [centerLng + halfWidth, centerLat + halfHeight], // top-right
+      [centerLng + halfWidth, centerLat - halfHeight], // bottom-right
+      [centerLng - halfWidth, centerLat - halfHeight], // bottom-left
+    ];
+    
+    imageBoundsRef.current = newBounds;
+    
+    // Update the image source if map exists
+    if (mapRef.current) {
+      updateImageSource(mapRef.current, newBounds, uploadedImageRef.current!);
+    }
+  };
+
+  // Update image source on the map
+  const updateImageSource = (map: Map, bounds: [number, number][], imageUrl: string) => {
+    // Remove existing image layer and source
+    if (map.getLayer(imageId)) map.removeLayer(imageId);
+    if (map.getSource(imageId)) map.removeSource(imageId);
+    
+    // Add new image source
+    console.log(imageUrl,"imageUrl");
+    map.addSource(imageId, {
+      type: 'image',
+      url: imageUrl,
+      coordinates: bounds,
+    });
+
+    map.addLayer({
+      id: imageId,
+      type: 'raster',
+      source: imageId,
+      paint: { 'raster-opacity': 0.8 },
+    });
+  };
+
+  // Remove uploaded image
+  const removeImage = () => {
+    uploadedImageRef.current = null
+    setImageSize(null);
+    if (mapRef.current && mapRef.current.getSource(imageId)) {
+      mapRef.current.removeLayer(imageId);
+      mapRef.current.removeSource(imageId);
+    }
+  };
+
+  // Building drawing functions
+  const calculatePolygonArea = (pts: Point[]): number => {
+    if (pts.length < 3) return 0;
+    
+    const R = 6371000;
+    let area = 0;
+    
+    for (let i = 0; i < pts.length; i++) {
+      const p1 = pts[i];
+      const p2 = pts[(i + 1) % pts.length];
+      
+      const φ1 = (p1.lat * Math.PI) / 180;
+      const φ2 = (p2.lat * Math.PI) / 180;
+      const Δλ = ((p2.lng - p1.lng) * Math.PI) / 180;
+      
+      area += Δλ * (2 + Math.sin(φ1) + Math.sin(φ2));
+    }
+    
+    area = Math.abs((area * R * R) / 2);
+    return area;
+  };
+
+  const formatMeasurement = (pts: Point[]): string => {
+    if (pts.length < 3) return '';
+    
+    const area = calculatePolygonArea(pts);
+    
+    if (area < 10000) {
+      return `Area: ${area.toFixed(2)} m²`;
+    } else {
+      return `Area: ${(area / 1000000).toFixed(2)} km²`;
+    }
+  };
+
+  const updateDrawing = (map: Map, pts: Point[]) => {
+    // Remove existing drawing layers
+    if (map.getLayer('drawing-line')) map.removeLayer('drawing-line');
+    if (map.getLayer('drawing-fill')) map.removeLayer('drawing-fill');
+    if (map.getLayer('drawing-points')) map.removeLayer('drawing-points');
+    if (map.getSource(drawingSourceId)) map.removeSource(drawingSourceId);
+    if (map.getSource(drawingPointsSourceId)) map.removeSource(drawingPointsSourceId);
+
+    if (pts.length === 0) return;
+
+    const coordinates = pts.map(p => [p.lng, p.lat]);
+    const polygonCoords = pts.length >= 3 ? [...coordinates, coordinates[0]] : coordinates;
+    
+    map.addSource(drawingSourceId, {
+      type: 'geojson',
+      data: {
+        type: 'Feature',
+        properties: {},
+        geometry: {
+          type: pts.length >= 3 ? 'Polygon' : 'LineString',
+          coordinates: pts.length >= 3 ? [polygonCoords] : coordinates
+        }
+      }
+    });
+
+    if (pts.length >= 3) {
+      map.addLayer({
+        id: 'drawing-fill',
+        type: 'fill',
+        source: drawingSourceId,
+        paint: {
+          'fill-color': '#3b82f6',
+          'fill-opacity': 0.4
+        }
+      });
+    }
+
+    map.addLayer({
+      id: 'drawing-line',
+      type: 'line',
+      source: drawingSourceId,
+      paint: {
+        'line-color': '#2563eb',
+        'line-width': 3
+      }
+    });
+
+    map.addSource(drawingPointsSourceId, {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features: pts.map(p => ({
+          type: 'Feature' as const,
+          properties: {},
+          geometry: {
+            type: 'Point' as const,
+            coordinates: [p.lng, p.lat]
+          }
+        }))
+      }
+    });
+
+    map.addLayer({
+      id: 'drawing-points',
+      type: 'circle',
+      source: drawingPointsSourceId,
+      paint: {
+        'circle-radius': 6,
+        'circle-color': '#ffffff',
+        'circle-stroke-width': 2,
+        'circle-stroke-color': '#2563eb'
+      }
+    });
+  };
+
+  const updateBuildingsLayer = (map: Map, buildingsList: Building[]) => {
+    // Remove existing building layers
+    if (map.getLayer('buildings-fill')) map.removeLayer('buildings-fill');
+    if (map.getLayer('buildings-line')) map.removeLayer('buildings-line');
+    if (map.getLayer('buildings-extrusion')) map.removeLayer('buildings-extrusion');
+    if (map.getSource(buildingsSourceId)) map.removeSource(buildingsSourceId);
+
+    if (buildingsList.length === 0) return;
+
+    map.addSource(buildingsSourceId, {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features: buildingsList.map((building, idx) => ({
+          type: 'Feature' as const,
+          properties: { height: building.height, id: idx },
+          geometry: {
+            type: 'Polygon' as const,
+            coordinates: [building.polygon]
+          }
+        }))
+      }
+    });
+
+    // 2D fill layer
+    map.addLayer({
+      id: 'buildings-fill',
+      type: 'fill',
+      source: buildingsSourceId,
+      paint: {
+        'fill-color': '#10b981',
+        'fill-opacity': 0.5
+      }
+    });
+
+    // 2D outline layer
+    map.addLayer({
+      id: 'buildings-line',
+      type: 'line',
+      source: buildingsSourceId,
+      paint: {
+        'line-color': '#059669',
+        'line-width': 2
+      }
+    });
+
+    // 3D extrusion layer
+    map.addLayer({
+      id: 'buildings-extrusion',
+      type: 'fill-extrusion',
+      source: buildingsSourceId,
+      paint: {
+        'fill-extrusion-color': '#4a90e2',
+        'fill-extrusion-height': ['get', 'height'],
+        'fill-extrusion-opacity': 0.9,
+      }
+    });
+  };
+
+  const startBuildingDrawing = () => {
+    clearDrawing();
+    setMode("drawBuildings");
+  };
+
+  const finishBuilding = () => {
+    if (drawingPoints.length >= 3) {
+      const newBuilding: Building = {
+        height: currentHeight,
+        polygon: drawingPoints.map(p => [p.lng, p.lat] as [number, number])
+      };
+      
+      const updatedBuildings = [...buildings, newBuilding];
+      setBuildings(updatedBuildings);
+      
+      if (mapRef.current) {
+        updateBuildingsLayer(mapRef.current, updatedBuildings);
+      }
+    }
+    clearDrawing();
+    setMode("view");
+  };
+
+  const clearDrawing = () => {
+    setDrawingPoints([]);
+    setMeasurement('');
+    if (mapRef.current) {
+      updateDrawing(mapRef.current, []);
+    }
+  };
+
+  const undoLastPoint = () => {
+    setDrawingPoints(prev => {
+      const updated = prev.slice(0, -1);
+      if (mapRef.current) {
+        updateDrawing(mapRef.current, updated);
+        setMeasurement(formatMeasurement(updated));
+      }
+      return updated;
+    });
+  };
+
+  const clearAllBuildings = () => {
+    setBuildings([]);
+    if (mapRef.current) {
+      updateBuildingsLayer(mapRef.current, []);
+    }
+  };
+
+  const copyToClipboard = () => {
+    const code = `const buildingsData: Building[] = ${JSON.stringify(buildings, null, 2)};`;
+    navigator.clipboard.writeText(code);
+    alert('Building data copied to clipboard!');
+  };
+
+  const deleteBuilding = (index: number) => {
+    const updated = buildings.filter((_, idx) => idx !== index);
+    setBuildings(updated);
+    if (mapRef.current) {
+      updateBuildingsLayer(mapRef.current, updated);
+    }
+  };
 
   // Image manipulation functions
   const enableImageDragResize = (map: Map) => {
@@ -211,7 +541,7 @@ export default function App() {
       ];
     };
 
-    const updateImageSource = (bounds: [number, number][]) => {
+    const updateImageBounds = (bounds: [number, number][]) => {
       imageBoundsRef.current = bounds;
       const src = map.getSource(imageId) as maplibregl.ImageSource;
       if (src && src.setCoordinates) {
@@ -223,8 +553,24 @@ export default function App() {
       const click = e.lngLat.toArray() as [number, number];
       const currentBounds = imageBoundsRef.current;
 
+      // Handle building drawing clicks
+      if (modeRef.current === "drawBuildings") {
+        const newPoint: Point = {
+          lng: click[0],
+          lat: click[1]
+        };
+        setDrawingPoints(prev => {
+          const updated = [...prev, newPoint];
+          updateDrawing(map, updated);
+          setMeasurement(formatMeasurement(updated));
+          return updated;
+        });
+        e.preventDefault();
+        return;
+      }
+
       // Only handle image interactions in imageEdit mode
-      if (modeRef.current !== "imageEdit") return;
+      if (modeRef.current !== "imageEdit" || !uploadedImageRef.current) return;
 
       activeCornerIndex = currentBounds.findIndex(([lng, lat]) =>
         Math.abs(lng - click[0]) < cornerThreshold &&
@@ -256,8 +602,14 @@ export default function App() {
       const current = e.lngLat.toArray() as [number, number];
       const currentBounds = imageBoundsRef.current;
 
+      // Handle cursor for building drawing
+      if (modeRef.current === "drawBuildings") {
+        map.getCanvas().style.cursor = 'crosshair';
+        return;
+      }
+
       // Handle cursor changes for image editing
-      if (modeRef.current === "imageEdit") {
+      if (modeRef.current === "imageEdit" && uploadedImageRef.current) {
         if (!isDragging && !isResizing && !isRotating) {
           const nearCorner = currentBounds.some(([lng, lat]) =>
             Math.abs(lng - current[0]) < cornerThreshold &&
@@ -283,7 +635,7 @@ export default function App() {
         const deltaLat = current[1] - dragStart[1];
         const moved = currentBounds.map(([lng, lat]) => [lng + deltaLng, lat + deltaLat]) as [number, number][];
         
-        updateImageSource(moved);
+        updateImageBounds(moved);
         dragStart = current;
       }
 
@@ -308,7 +660,7 @@ export default function App() {
           ] as [number, number];
         });
         
-        updateImageSource(updated);
+        updateImageBounds(updated);
       }
 
       if (isRotating) {
@@ -320,7 +672,7 @@ export default function App() {
           rotatePoint(corner, center, rotationAngle)
         ) as [number, number][];
         
-        updateImageSource(rotated);
+        updateImageBounds(rotated);
         initialAngle = currentAngle;
       }
     };
@@ -334,7 +686,7 @@ export default function App() {
       isRotating = false;
       dragStart = null;
       activeCornerIndex = null;
-      if (modeRef.current !== "imageEdit") {
+      if (modeRef.current !== "imageEdit" && modeRef.current !== "drawBuildings") {
         map.getCanvas().style.cursor = '';
       }
     };
@@ -345,7 +697,7 @@ export default function App() {
     map.on('mouseout', onMouseUp);
   };
 
-  // Node and line functions from first code
+  // Node and line functions
   function findNodeAtPoint(
     lngLat: { lng: number; lat: number },
     nodesList: Node[]
@@ -412,55 +764,16 @@ export default function App() {
         "https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json",
       center: [-74.0179, 40.706],
       zoom: 17,
-      // pitch: 60,
-      // bearing: -17.6,
-      // maxBounds: [
-      //   [-74.019, 40.705],
-      //   [-74.016, 40.707],
-      // ],
     });
 
     mapRef.current = map;
 
     map.on("load", () => {
-      // Add building extrusions
-      buildingsData.forEach((b, i) => {
-        const coords = [...b.polygon, b.polygon[0]];
-        map.addSource(`building-${i}`, {
-          type: "geojson",
-          data: {
-            type: "Feature",
-            geometry: { type: "Polygon", coordinates: [coords] },
-          },
-        });
-        map.addLayer({
-          id: `building-${i}-extrusion`,
-          type: "fill-extrusion",
-          source: `building-${i}`,
-          paint: {
-            "fill-extrusion-color": "#4a90e2",
-            "fill-extrusion-height": b.height,
-            "fill-extrusion-opacity": 0.9,
-          },
-        });
-      });
-
-      // Add image layer
-      map.addSource(imageId, {
-        type: 'image',
-        url: '/Bee-icon.png',
-        coordinates: imageBoundsRef.current,
-      });
-
-      map.addLayer({
-        id: imageId,
-        type: 'raster',
-        source: imageId,
-        paint: { 'raster-opacity': 0.8 },
-      });
-
       // Enable image drag/resize
       enableImageDragResize(map);
+
+      // Add initial buildings
+      updateBuildingsLayer(map, buildings);
 
       // Google Maps style road layers
       map.addSource("lines", {
@@ -763,6 +1076,7 @@ export default function App() {
 
   return (
     <div className="w-full h-screen bg-gray-900">
+      {/* Main Tools Panel */}
       <div className="absolute top-4 left-4 z-10 flex flex-col gap-2 bg-gray-800/95 backdrop-blur-sm p-3 rounded-lg shadow-xl border border-gray-700">
         <div className="text-white font-bold mb-2 flex items-center gap-2">
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -770,6 +1084,28 @@ export default function App() {
           </svg>
           Tools
         </div>
+        
+        {/* Image Upload Section */}
+        <div className="mb-2">
+          <label className="block text-white text-sm font-medium mb-1">
+            Upload Image:
+          </label>
+          <input
+            type="file"
+            accept="image/*"
+            onChange={handleImageUpload}
+            className="w-full text-white text-sm file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+          />
+          {uploadedImageRef.current && (
+            <button
+              onClick={removeImage}
+              className="w-full mt-2 px-3 py-2 bg-red-500 text-white rounded text-sm font-medium hover:bg-red-600 transition-all"
+            >
+              Remove Image
+            </button>
+          )}
+        </div>
+
         <button
           onClick={() => setMode("view")}
           className={`px-4 py-2 rounded text-sm font-medium transition-all ${
@@ -805,13 +1141,26 @@ export default function App() {
         </button>
         <button
           onClick={() => setMode("imageEdit")}
+          disabled={!uploadedImageRef.current}
           className={`px-4 py-2 rounded text-sm font-medium transition-all ${
             mode === "imageEdit"
               ? "bg-purple-500 text-white shadow-lg"
-              : "bg-gray-700 text-gray-300 hover:bg-gray-600"
+              : !uploadedImageRef.current 
+                ? "bg-gray-500 text-gray-400 cursor-not-allowed"
+                : "bg-gray-700 text-gray-300 hover:bg-gray-600"
           }`}
         >
           🖼️ Edit Image
+        </button>
+        <button
+          onClick={startBuildingDrawing}
+          className={`px-4 py-2 rounded text-sm font-medium transition-all ${
+            mode === "drawBuildings"
+              ? "bg-indigo-500 text-white shadow-lg"
+              : "bg-gray-700 text-gray-300 hover:bg-gray-600"
+          }`}
+        >
+          🏗️ Draw Buildings
         </button>
         {currentLine && (
           <button
@@ -829,54 +1178,243 @@ export default function App() {
         )}
       </div>
 
-      <div className="absolute top-4 right-4 z-10 bg-gray-800/95 backdrop-blur-sm text-white p-4 rounded-lg shadow-xl border border-gray-700">
-        <h3 className="font-bold mb-3 flex items-center gap-2">
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          Info
-        </h3>
-        <div className="text-sm space-y-2">
-          <div className="flex justify-between gap-4">
-            <span className="text-gray-400">Buildings:</span>
-            <span className="font-semibold">2</span>
+      {/* Building Drawing Panel */}
+      {mode === "drawBuildings" && (
+        <div style={{
+          position: 'absolute',
+          top: '10px',
+          right: '10px',
+          background: 'white',
+          padding: '15px',
+          borderRadius: '8px',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+          fontFamily: 'system-ui, -apple-system, sans-serif',
+          fontSize: '13px',
+          maxWidth: '320px',
+          maxHeight: '90vh',
+          overflowY: 'auto',
+          zIndex: 1000
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+            <strong style={{ fontSize: '14px' }}>🏗️ Building Drawing Tool</strong>
+            <button 
+              onClick={() => setShowBuildingPanel(!showBuildingPanel)}
+              style={{
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                fontSize: '16px',
+                padding: '2px 6px'
+              }}
+            >
+              {showBuildingPanel ? '−' : '+'}
+            </button>
           </div>
-          <div className="flex justify-between gap-4">
-            <span className="text-gray-400">Roads:</span>
-            <span className="font-semibold text-blue-400">{lines.length}</span>
-          </div>
-          <div className="flex justify-between gap-4">
-            <span className="text-gray-400">Nodes:</span>
-            <span className="font-semibold text-orange-400">{nodes.length}</span>
-          </div>
-          <div className="flex justify-between gap-4">
-            <span className="text-gray-400">Mode:</span>
-            <span className="font-semibold text-purple-400 capitalize">{mode}</span>
-          </div>
-          {currentLine && (
-            <div className="text-yellow-400 mt-3 pt-3 border-t border-gray-600">
-              <div className="flex items-center gap-2 mb-1">
-                <span className="animate-pulse">🔴</span>
-                <span className="font-semibold">Drawing...</span>
+          
+          {showBuildingPanel && (
+            <>
+              {/* Height Input */}
+              <div style={{ marginBottom: '12px' }}>
+                <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500' }}>
+                  Building Height (m):
+                </label>
+                <input
+                  type="number"
+                  value={currentHeight}
+                  onChange={(e) => setCurrentHeight(Number(e.target.value))}
+                  style={{
+                    width: '100%',
+                    padding: '8px',
+                    border: '1px solid #d1d5db',
+                    borderRadius: '6px',
+                    fontSize: '13px'
+                  }}
+                />
               </div>
-              <div className="text-xs text-gray-300 mt-2">
-                Double-click or click start node to finish
+
+              {/* Drawing Controls */}
+              <div style={{ marginBottom: '12px' }}>
+                <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
+                  <button
+                    onClick={undoLastPoint}
+                    disabled={drawingPoints.length === 0}
+                    style={{
+                      flex: 1,
+                      padding: '8px',
+                      background: drawingPoints.length === 0 ? '#e5e7eb' : '#f59e0b',
+                      color: drawingPoints.length === 0 ? '#9ca3af' : 'white',
+                      border: 'none',
+                      borderRadius: '6px',
+                      cursor: drawingPoints.length === 0 ? 'not-allowed' : 'pointer',
+                      fontSize: '12px',
+                      fontWeight: '500'
+                    }}
+                  >
+                    ↶ Undo
+                  </button>
+                  <button
+                    onClick={finishBuilding}
+                    disabled={drawingPoints.length < 3}
+                    style={{
+                      flex: 1,
+                      padding: '8px',
+                      background: drawingPoints.length < 3 ? '#e5e7eb' : '#10b981',
+                      color: drawingPoints.length < 3 ? '#9ca3af' : 'white',
+                      border: 'none',
+                      borderRadius: '6px',
+                      cursor: drawingPoints.length < 3 ? 'not-allowed' : 'pointer',
+                      fontSize: '12px',
+                      fontWeight: '600'
+                    }}
+                  >
+                    ✓ Save Building
+                  </button>
+                </div>
+                
+                <div style={{
+                  padding: '10px',
+                  background: '#eff6ff',
+                  borderRadius: '6px',
+                  fontSize: '12px'
+                }}>
+                  <div style={{ marginBottom: '4px' }}>
+                    <strong>Points:</strong> {drawingPoints.length}
+                  </div>
+                  {measurement && (
+                    <div style={{ color: '#1e40af', fontWeight: '600' }}>
+                      {measurement}
+                    </div>
+                  )}
+                  <div style={{ marginTop: '6px', color: '#6b7280', fontSize: '11px' }}>
+                    Click map to add points. Need at least 3 points.
+                  </div>
+                </div>
               </div>
-            </div>
-          )}
-          {mode === "imageEdit" && (
-            <div className="text-green-400 mt-3 pt-3 border-t border-gray-600">
-              <div className="flex items-center gap-2 mb-1">
-                <span>🖼️</span>
-                <span className="font-semibold">Image Edit Mode</span>
+
+              {/* Buildings List */}
+              <div style={{
+                borderTop: '1px solid #e5e7eb',
+                paddingTop: '12px',
+                marginBottom: '12px'
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                  <strong style={{ fontSize: '13px' }}>Buildings ({buildings.length})</strong>
+                  {buildings.length > 0 && (
+                    <button
+                      onClick={clearAllBuildings}
+                      style={{
+                        padding: '4px 8px',
+                        background: '#ef4444',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                        fontSize: '11px'
+                      }}
+                    >
+                      Clear All
+                    </button>
+                  )}
+                </div>
+                
+                <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
+                  {buildings.map((building, idx) => (
+                    <div key={idx} style={{
+                      padding: '8px',
+                      background: '#f9fafb',
+                      borderRadius: '4px',
+                      marginBottom: '6px',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      fontSize: '12px'
+                    }}>
+                      <div>
+                        <div><strong>Building {idx + 1}</strong></div>
+                        <div style={{ color: '#6b7280' }}>
+                          Height: {building.height}m | Points: {building.polygon.length}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => deleteBuilding(idx)}
+                        style={{
+                          padding: '4px 8px',
+                          background: '#ef4444',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          fontSize: '11px'
+                        }}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
               </div>
-              <div className="text-xs text-gray-300 mt-2">
-                Drag to move, corners to resize, edges to rotate
-              </div>
-            </div>
+
+              {/* Export Code */}
+              {buildings.length > 0 && (
+                <div>
+                  <button
+                    onClick={() => setShowCode(!showCode)}
+                    style={{
+                      width: '100%',
+                      padding: '10px',
+                      background: '#8b5cf6',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '6px',
+                      cursor: 'pointer',
+                      fontSize: '13px',
+                      fontWeight: '600',
+                      marginBottom: '8px'
+                    }}
+                  >
+                    {showCode ? '📋 Hide Code' : '📋 Show Code'}
+                  </button>
+                  
+                  {showCode && (
+                    <div>
+                      <pre style={{
+                        background: '#1f2937',
+                        color: '#f3f4f6',
+                        padding: '12px',
+                        borderRadius: '6px',
+                        fontSize: '11px',
+                        maxHeight: '300px',
+                        overflowY: 'auto',
+                        marginBottom: '8px',
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-all'
+                      }}>
+                        {`const buildingsData: Building[] = ${JSON.stringify(buildings, null, 2)};`}
+                      </pre>
+                      <button
+                        onClick={copyToClipboard}
+                        style={{
+                          width: '100%',
+                          padding: '8px',
+                          background: '#10b981',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '6px',
+                          cursor: 'pointer',
+                          fontSize: '12px',
+                          fontWeight: '500'
+                        }}
+                      >
+                        📋 Copy to Clipboard
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
           )}
         </div>
-      </div>
+      )}
 
       <div ref={mapContainer} className="w-full h-full" />
     </div>
