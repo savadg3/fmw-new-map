@@ -7,10 +7,10 @@ export default function InteractiveMap() {
   const mapContainer = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
   const imageBoundsRef = useRef<[number, number][]>([
-    [77.58, 12.94],
-    [77.60, 12.94],
-    [77.60, 12.92],
-    [77.58, 12.92],
+    [77.58, 12.94], // top-left
+    [77.60, 12.94], // top-right
+    [77.60, 12.92], // bottom-right
+    [77.58, 12.92], // bottom-left
   ]);
 
   const imageId = 'custom-image-layer';
@@ -37,26 +37,24 @@ export default function InteractiveMap() {
         id: imageId,
         type: 'raster',
         source: imageId,
-          paint: { 'raster-opacity': 0.8 },
+        paint: { 'raster-opacity': 0.8 },
       });
 
+      // Add draggable + resizable behavior
       enableDragResize(map);
     });
 
     return () => map.remove();
   }, []);
 
+  /** 🖱 Enable drag + resize interactions */
   const enableDragResize = (map: Map) => {
     let dragStart: [number, number] | null = null;
     let isDragging = false;
     let isResizing = false;
-    let isRotating = false;
     let activeCornerIndex: number | null = null;
-    let initialAngle: number = 0;
 
-    // const cornerThreshold = 0.003;
-    const cornerThreshold = 0.0001;
-    const edgeThreshold = 0.0001; 
+    const cornerThreshold = 0.003;
 
     const disableMapInteractions = () => {
       map.dragPan.disable();
@@ -84,57 +82,6 @@ export default function InteractiveMap() {
       return lng >= minLng && lng <= maxLng && lat >= minLat && lat <= maxLat;
     };
 
-    const isPointNearEdge = (point: [number, number], bounds: [number, number][]) => {
-      const [lng, lat] = point;
-      
-      for (let i = 0; i < 4; i++) {
-        const p1 = bounds[i];
-        const p2 = bounds[(i + 1) % 4];
-        
-        const A = lng - p1[0];
-        const B = lat - p1[1];
-        const C = p2[0] - p1[0];
-        const D = p2[1] - p1[1];
-        
-        const dot = A * C + B * D;
-        const lenSq = C * C + D * D;
-        const param = lenSq !== 0 ? dot / lenSq : -1;
-        
-        if (param >= 0 && param <= 1) {
-          const xx = p1[0] + param * C;
-          const yy = p1[1] + param * D;
-          const dist = Math.sqrt((lng - xx) ** 2 + (lat - yy) ** 2);
-          
-          if (dist < edgeThreshold) {
-            return true;
-          }
-        }
-      }
-      return false;
-    };
-
-    const getCenter = (bounds: [number, number][]) => {
-      const centerLng = (bounds[0][0] + bounds[2][0]) / 2;
-      const centerLat = (bounds[0][1] + bounds[2][1]) / 2;
-      return [centerLng, centerLat] as [number, number];
-    };
-
-    const getAngle = (center: [number, number], point: [number, number]) => {
-      return Math.atan2(point[1] - center[1], point[0] - center[0]);
-    };
-
-    const rotatePoint = (point: [number, number], center: [number, number], angle: number): [number, number] => {
-      const cos = Math.cos(angle);
-      const sin = Math.sin(angle);
-      const dx = point[0] - center[0];
-      const dy = point[1] - center[1];
-      
-      return [
-        center[0] + (dx * cos - dy * sin),
-        center[1] + (dx * sin + dy * cos)
-      ];
-    };
-
     const updateImageSource = (bounds: [number, number][]) => {
       const src = map.getSource(imageId) as maplibregl.ImageSource;
       if (src && src.setCoordinates) {
@@ -146,6 +93,7 @@ export default function InteractiveMap() {
       const click = e.lngLat.toArray() as [number, number];
       const currentBounds = imageBoundsRef.current;
 
+      // Check if clicking near a corner
       activeCornerIndex = currentBounds.findIndex(([lng, lat]) =>
         Math.abs(lng - click[0]) < cornerThreshold &&
         Math.abs(lat - click[1]) < cornerThreshold
@@ -155,13 +103,6 @@ export default function InteractiveMap() {
         isResizing = true;
         disableMapInteractions();
         map.getCanvas().style.cursor = 'nwse-resize';
-        e.preventDefault();
-      } else if (isPointNearEdge(click, currentBounds)) {
-        isRotating = true;
-        const center = getCenter(currentBounds);
-        initialAngle = getAngle(center, click);
-        disableMapInteractions();
-        map.getCanvas().style.cursor = 'crosshair';
         e.preventDefault();
       } else if (isPointInBounds(click, currentBounds)) {
         isDragging = true;
@@ -176,7 +117,8 @@ export default function InteractiveMap() {
       const current = e.lngLat.toArray() as [number, number];
       const currentBounds = imageBoundsRef.current;
 
-      if (!isDragging && !isResizing && !isRotating) {
+      // Change cursor when hovering
+      if (!isDragging && !isResizing) {
         const nearCorner = currentBounds.some(([lng, lat]) =>
           Math.abs(lng - current[0]) < cornerThreshold &&
           Math.abs(lat - current[1]) < cornerThreshold
@@ -184,8 +126,6 @@ export default function InteractiveMap() {
         
         if (nearCorner) {
           map.getCanvas().style.cursor = 'nwse-resize';
-        } else if (isPointNearEdge(current, currentBounds)) {
-          map.getCanvas().style.cursor = 'crosshair';
         } else if (isPointInBounds(current, currentBounds)) {
           map.getCanvas().style.cursor = 'move';
         } else {
@@ -205,56 +145,33 @@ export default function InteractiveMap() {
       }
 
       if (isResizing && activeCornerIndex !== null) {
-        const center = getCenter(currentBounds);
+        // Get the center point of the rectangle
+        const centerLng = (currentBounds[0][0] + currentBounds[2][0]) / 2;
+        const centerLat = (currentBounds[0][1] + currentBounds[2][1]) / 2;
         
-        const edge = [currentBounds[1][0] - currentBounds[0][0], currentBounds[1][1] - currentBounds[0][1]];
-        const currentRotation = Math.atan2(edge[1], edge[0]);
+        // Calculate distance from center to current mouse position
+        const newDistLng = Math.abs(current[0] - centerLng);
+        const newDistLat = Math.abs(current[1] - centerLat);
         
-        const dx = current[0] - center[0];
-        const dy = current[1] - center[1];
-        const newDist = Math.sqrt(dx * dx + dy * dy);
-        
-        const origDx = currentBounds[activeCornerIndex][0] - center[0];
-        const origDy = currentBounds[activeCornerIndex][1] - center[1];
-        const origDist = Math.sqrt(origDx * origDx + origDy * origDy);
-        
-        const scale = newDist / origDist;
-        
-        const updated = currentBounds.map(corner => {
-          const cdx = corner[0] - center[0];
-          const cdy = corner[1] - center[1];
-          return [
-            center[0] + cdx * scale,
-            center[1] + cdy * scale
-          ] as [number, number];
-        });
+        // Create new bounds maintaining rectangular shape
+        const updated: [number, number][] = [
+          [centerLng - newDistLng, centerLat + newDistLat], // top-left
+          [centerLng + newDistLng, centerLat + newDistLat], // top-right
+          [centerLng + newDistLng, centerLat - newDistLat], // bottom-right
+          [centerLng - newDistLng, centerLat - newDistLat], // bottom-left
+        ];
         
         imageBoundsRef.current = updated;
         updateImageSource(updated);
       }
-
-      if (isRotating) {
-        const center = getCenter(currentBounds);
-        const currentAngle = getAngle(center, current);
-        const rotationAngle = currentAngle - initialAngle;
-        
-        const rotated = currentBounds.map(corner => 
-          rotatePoint(corner, center, rotationAngle)
-        ) as [number, number][];
-        
-        imageBoundsRef.current = rotated;
-        updateImageSource(rotated);
-        initialAngle = currentAngle;
-      }
     };
 
     const onMouseUp = () => {
-      if (isDragging || isResizing || isRotating) {
+      if (isDragging || isResizing) {
         enableMapInteractions();
       }
       isDragging = false;
       isResizing = false;
-      isRotating = false;
       dragStart = null;
       activeCornerIndex = null;
       map.getCanvas().style.cursor = '';
@@ -284,7 +201,6 @@ export default function InteractiveMap() {
         <ul style={{ margin: '5px 0', paddingLeft: '20px' }}>
           <li>Click and drag the image to move it</li>
           <li>Click and drag corners to resize</li>
-          <li>Click and drag edges to rotate</li>
           <li>Map pan/zoom disabled during interaction</li>
         </ul>
       </div>
