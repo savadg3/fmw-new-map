@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import maplibregl, { Map } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 
@@ -10,6 +10,7 @@ declare global {
 }
 
 interface Building {
+  id: string;
   height: number;
   polygon: [number, number][];
 }
@@ -26,18 +27,52 @@ interface Line {
 
 type Mode = "view" | "drawBuildings" | "imageEdit";
 
+// Throttle utility
+function throttle<T extends (...args: any[]) => any>(
+  func: T,
+  limit: number
+): (...args: Parameters<T>) => void {
+  let inThrottle: boolean;
+  return function(this: any, ...args: Parameters<T>) {
+    if (!inThrottle) {
+      func.apply(this, args);
+      inThrottle = true;
+      setTimeout(() => (inThrottle = false), limit);
+    }
+  };
+}
+
+// Debounce utility
+function debounce<T extends (...args: any[]) => any>(
+  func: T,
+  wait: number
+): (...args: Parameters<T>) => void {
+  let timeout: NodeJS.Timeout | null = null;
+  return function(this: any, ...args: Parameters<T>) {
+    if (timeout) clearTimeout(timeout);
+    timeout = setTimeout(() => func.apply(this, args), wait);
+  };
+}
+
 export default function App() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<Map | null>(null);
   const [mode, setMode] = useState<Mode>("view");
 
-  // Building drawing state
+  // Building drawing state - using array with Map for efficient lookups
   const [buildings, setBuildings] = useState<Building[]>([]);
   const [currentLines, setCurrentLines] = useState<Line[]>([]);
   const [currentLine, setCurrentLine] = useState<Line | null>(null);
   const [currentHeight, setCurrentHeight] = useState<number>(10);
   const [measurement, setMeasurement] = useState<string>('');
   const [showBuildingPanel, setShowBuildingPanel] = useState(true);
+
+  // Convert buildings array to Map for O(1) lookups when needed
+  // const buildingsMap = useMemo(() => {
+  //   const map = new Map<string, Building>();
+  //   buildings.forEach(b => map.set(b.id, b));
+  //   return map;
+  // }, [buildings]);
 
   // Image upload and manipulation state
   const uploadedImageRef = useRef<string | null>(null);
@@ -61,6 +96,14 @@ export default function App() {
   const currentLinesRef = useRef<Line[]>(currentLines);
   const currentLineRef = useRef<Line | null>(currentLine);
   const lastClickTime = useRef<number>(0);
+  
+  // Event listener cleanup refs
+  const eventListenersRef = useRef<{
+    mousedown?: (e: any) => void;
+    mousemove?: (e: any) => void;
+    mouseup?: (e: any) => void;
+    mouseout?: (e: any) => void;
+  }>({});
 
   // Update refs when state changes
   useEffect(() => {
@@ -80,7 +123,7 @@ export default function App() {
   }, [currentLine]);
 
   // Image upload handler
-  const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
@@ -108,10 +151,10 @@ export default function App() {
     };
     reader.readAsDataURL(file);
     event.target.value = "";
-  };
+  }, []);
 
   // Calculate image bounds
-  const calculateImageBounds = (centerLng: number, centerLat: number, imgWidth: number, imgHeight: number, zoom: number) => {
+  const calculateImageBounds = useCallback((centerLng: number, centerLat: number, imgWidth: number, imgHeight: number, zoom: number) => {
     const scale = Math.pow(2, 17 - zoom);
     const aspectRatio = imgWidth / imgHeight;
     
@@ -139,10 +182,10 @@ export default function App() {
     if (mapRef.current) {
       updateImageSource(mapRef.current, newBounds, uploadedImageRef.current!);
     }
-  };
+  }, []);
 
   // Update image source on the map
-  const updateImageSource = (map: Map, bounds: [number, number][], imageUrl: string) => {
+  const updateImageSource = useCallback((map: Map, bounds: [number, number][], imageUrl: string) => {
     if (map.getLayer(imageId)) map.removeLayer(imageId);
     if (map.getSource(imageId)) map.removeSource(imageId);
     
@@ -158,21 +201,21 @@ export default function App() {
       source: imageId,
       paint: { 'raster-opacity': 0.8 },
     });
-  };
+  }, []);
 
   // Remove uploaded image
-  const removeImage = () => {
+  const removeImage = useCallback(() => {
     uploadedImageRef.current = null;
     setImageSize(null);
     if (mapRef.current && mapRef.current.getSource(imageId)) {
       mapRef.current.removeLayer(imageId);
       mapRef.current.removeSource(imageId);
     }
-    setMode("view")
-  };
+    setMode("view");
+  }, []);
 
-  // Calculate perimeter of lines
-  const calculatePerimeter = (lines: Line[]): number => {
+  // Calculate perimeter of lines - memoized
+  const calculatePerimeter = useCallback((lines: Line[]): number => {
     if (lines.length === 0) return 0;
     
     const calculateDistance = (p1: Point, p2: Point): number => {
@@ -200,9 +243,9 @@ export default function App() {
     });
     
     return total;
-  };
+  }, []);
 
-  const formatMeasurement = (lines: Line[]): string => {
+  const formatMeasurement = useCallback((lines: Line[]): string => {
     const perimeter = calculatePerimeter(lines);
     
     if (perimeter < 1000) {
@@ -210,35 +253,10 @@ export default function App() {
     } else {
       return `Perimeter: ${(perimeter / 1000).toFixed(2)} km`;
     }
-  };
+  }, [calculatePerimeter]);
 
-  // Safely remove layer and source
- const safeRemoveLayerAndSource = (map: Map, layerIds: string[], sourceId: string) => {
-    // Remove all layers first
-    layerIds.forEach(layerId => {
-      if (map.getLayer(layerId)) {
-        map.removeLayer(layerId);
-      }
-    });
-    
-    // Then remove the source
-    if (map.getSource(sourceId)) {
-      map.removeSource(sourceId);
-    }
-  };
-
- // Update drawing on the map
-  const updateDrawing = (map: Map, lines: Line[], previewLine: Line | null = null) => {
-    // Define all drawing layer IDs
-    const drawingLayerIds = ['drawing-lines', 'drawing-points', 'preview-line'];
-    
-    // Remove existing drawing layers and sources in correct order
-    safeRemoveLayerAndSource(map, drawingLayerIds, drawingSourceId);
-    safeRemoveLayerAndSource(map, [], previewSourceId); // preview source doesn't have multiple layers
-    safeRemoveLayerAndSource(map, [], 'drawing-points'); // points source
-
-    if (lines.length === 0 && !previewLine) return;
-
+  // Update drawing on the map - OPTIMIZED with setData
+  const updateDrawing = useCallback((map: Map, lines: Line[], previewLine: Line | null = null) => {
     // Create features for all completed lines
     const lineFeatures = lines.map(line => ({
       type: "Feature" as const,
@@ -264,8 +282,14 @@ export default function App() {
       });
     });
 
-    // Add completed lines
-    if (lineFeatures.length > 0) {
+    // Update or create completed lines source
+    const drawingSource = map.getSource(drawingSourceId) as maplibregl.GeoJSONSource;
+    if (drawingSource) {
+      drawingSource.setData({
+        type: 'FeatureCollection',
+        features: lineFeatures
+      });
+    } else if (lineFeatures.length > 0) {
       map.addSource(drawingSourceId, {
         type: 'geojson',
         data: {
@@ -285,37 +309,55 @@ export default function App() {
       });
     }
 
-    // Add preview line (current drawing line)
+    // Update or create preview line
+    const previewSource = map.getSource(previewSourceId) as maplibregl.GeoJSONSource;
     if (previewLine && previewLine.points.length > 0) {
-      map.addSource(previewSourceId, {
-        type: 'geojson',
-        data: {
-          type: 'FeatureCollection',
-          features: [{
-            type: "Feature" as const,
-            properties: {},
-            geometry: {
-              type: "LineString" as const,
-              coordinates: previewLine.points
-            }
-          }]
-        }
-      });
+      const previewData = {
+        type: 'FeatureCollection' as const,
+        features: [{
+          type: "Feature" as const,
+          properties: {},
+          geometry: {
+            type: "LineString" as const,
+            coordinates: previewLine.points
+          }
+        }]
+      };
 
-      map.addLayer({
-        id: 'preview-line',
-        type: 'line',
-        source: previewSourceId,
-        paint: {
-          'line-color': '#ef4444',
-          'line-width': 3,
-          'line-dasharray': [2, 2]
-        }
+      if (previewSource) {
+        previewSource.setData(previewData);
+      } else {
+        map.addSource(previewSourceId, {
+          type: 'geojson',
+          data: previewData
+        });
+
+        map.addLayer({
+          id: 'preview-line',
+          type: 'line',
+          source: previewSourceId,
+          paint: {
+            'line-color': '#ef4444',
+            'line-width': 3,
+            'line-dasharray': [2, 2]
+          }
+        });
+      }
+    } else if (previewSource) {
+      previewSource.setData({
+        type: 'FeatureCollection',
+        features: []
       });
     }
 
-    // Add points layer if we have points
-    if (pointFeatures.length > 0) {
+    // Update or create points
+    const pointsSource = map.getSource('drawing-points') as maplibregl.GeoJSONSource;
+    if (pointsSource) {
+      pointsSource.setData({
+        type: 'FeatureCollection',
+        features: pointFeatures
+      });
+    } else if (pointFeatures.length > 0) {
       map.addSource('drawing-points', {
         type: 'geojson',
         data: {
@@ -336,27 +378,27 @@ export default function App() {
         }
       });
     }
-  };
+  }, []);
 
-  // Update preview line when mouse moves
-  const updatePreviewLine = (map: Map, mousePoint: Point | null) => {
-    if (!currentLineRef.current || !mousePoint) {
-      // Remove preview line if no current line
-      safeRemoveLayerAndSource(map, ['preview-line'], previewSourceId);
-      return;
-    }
+  // Update preview line when mouse moves - THROTTLED
+  const updatePreviewLine = useMemo(
+    () => throttle((map: Map, mousePoint: Point | null) => {
+      if (!currentLineRef.current || !mousePoint) {
+        const previewSource = map.getSource(previewSourceId) as maplibregl.GeoJSONSource;
+        if (previewSource) {
+          previewSource.setData({
+            type: 'FeatureCollection',
+            features: []
+          });
+        }
+        return;
+      }
 
-    // Create preview line from current line points to mouse position
-    const previewPoints = [...currentLineRef.current.points, [mousePoint.lng, mousePoint.lat]];
-    
-    // Remove existing preview
-    safeRemoveLayerAndSource(map, ['preview-line'], previewSourceId);
-
-    // Add new preview
-    map.addSource(previewSourceId, {
-      type: 'geojson',
-      data: {
-        type: 'FeatureCollection',
+      const previewPoints = [...currentLineRef.current.points, [mousePoint.lng, mousePoint.lat]];
+      
+      const previewSource = map.getSource(previewSourceId) as maplibregl.GeoJSONSource;
+      const previewData = {
+        type: 'FeatureCollection' as const,
         features: [{
           type: "Feature" as const,
           properties: {},
@@ -365,92 +407,105 @@ export default function App() {
             coordinates: previewPoints
           }
         }]
-      }
-    });
+      };
 
-    map.addLayer({
-      id: 'preview-line',
-      type: 'line',
-      source: previewSourceId,
-      paint: {
-        'line-color': '#ef4444',
-        'line-width': 3,
-        'line-dasharray': [2, 2]
-      }
-    });
-  };
+      if (previewSource) {
+        previewSource.setData(previewData);
+      } else {
+        map.addSource(previewSourceId, {
+          type: 'geojson',
+          data: previewData
+        });
 
-  // Update buildings layer
-  const updateBuildingsLayer = (map: Map, buildingsList: Building[]) => {
-    // Define all building layer IDs that use the buildings source
-    const buildingLayerIds = ['buildings-fill', 'buildings-line', 'buildings-extrusion'];
-    
-    // Remove all building layers and source
-    safeRemoveLayerAndSource(map, buildingLayerIds, buildingsSourceId);
-
-    if (buildingsList.length === 0) return;
-
-    map.addSource(buildingsSourceId, {
-      type: 'geojson',
-      data: {
-        type: 'FeatureCollection',
-        features: buildingsList.map((building, idx) => ({
-          type: 'Feature' as const,
-          properties: { height: building.height, id: idx },
-          geometry: {
-            type: 'Polygon' as const,
-            coordinates: [building.polygon]
+        map.addLayer({
+          id: 'preview-line',
+          type: 'line',
+          source: previewSourceId,
+          paint: {
+            'line-color': '#ef4444',
+            'line-width': 3,
+            'line-dasharray': [2, 2]
           }
-        }))
+        });
       }
-    });
+    }, 16),
+    []
+  );
 
-    // 2D fill layer
-    map.addLayer({
-      id: 'buildings-fill',
-      type: 'fill',
-      source: buildingsSourceId,
-      paint: {
-        'fill-color': '#10b981',
-        'fill-opacity': 0.5
+  // Update buildings layer - OPTIMIZED with setData
+  const updateBuildingsLayer = useCallback((map: Map, buildingsList: Building[]) => {
+    const buildingsSource = map.getSource(buildingsSourceId) as maplibregl.GeoJSONSource;
+    
+    const features = buildingsList.map((building) => ({
+      type: 'Feature' as const,
+      properties: { height: building.height, id: building.id },
+      geometry: {
+        type: 'Polygon' as const,
+        coordinates: [building.polygon]
       }
-    });
+    }));
 
-    // 2D outline layer
-    map.addLayer({
-      id: 'buildings-line',
-      type: 'line',
-      source: buildingsSourceId,
-      paint: {
-        'line-color': '#059669',
-        'line-width': 2
-      }
-    });
+    if (buildingsSource) {
+      buildingsSource.setData({
+        type: 'FeatureCollection',
+        features: features
+      });
+    } else if (features.length > 0) {
+      map.addSource(buildingsSourceId, {
+        type: 'geojson',
+        data: {
+          type: 'FeatureCollection',
+          features: features
+        }
+      });
 
-    // 3D extrusion layer
-    map.addLayer({
-      id: 'buildings-extrusion',
-      type: 'fill-extrusion',
-      source: buildingsSourceId,
-      paint: {
-        'fill-extrusion-color': '#4a90e2',
-        'fill-extrusion-height': ['get', 'height'],
-        'fill-extrusion-opacity': 0.9,
-      }
-    });
-  };
+      // 2D fill layer
+      map.addLayer({
+        id: 'buildings-fill',
+        type: 'fill',
+        source: buildingsSourceId,
+        paint: {
+          'fill-color': '#10b981',
+          'fill-opacity': 0.5
+        }
+      });
+
+      // 2D outline layer
+      map.addLayer({
+        id: 'buildings-line',
+        type: 'line',
+        source: buildingsSourceId,
+        paint: {
+          'line-color': '#059669',
+          'line-width': 2
+        }
+      });
+
+      // 3D extrusion layer
+      map.addLayer({
+        id: 'buildings-extrusion',
+        type: 'fill-extrusion',
+        source: buildingsSourceId,
+        paint: {
+          'fill-extrusion-color': '#4a90e2',
+          'fill-extrusion-height': ['get', 'height'],
+          'fill-extrusion-opacity': 0.9,
+        }
+      });
+    }
+  }, []);
 
   // Start drawing a new line
-  const startNewLine = (point: Point) => {
+  const startNewLine = useCallback((point: Point) => {
     const newLine: Line = {
       id: Date.now(),
       points: [[point.lng, point.lat]]
     };
     setCurrentLine(newLine);
-  };
+  }, []);
 
   // Add point to current line
-  const addPointToCurrentLine = (point: Point) => {
+  const addPointToCurrentLine = useCallback((point: Point) => {
     if (!currentLineRef.current) return;
     
     const updatedLine = {
@@ -458,10 +513,10 @@ export default function App() {
       points: [...currentLineRef.current.points, [point.lng, point.lat]]
     };
     setCurrentLine(updatedLine);
-  };
+  }, []);
 
   // Finish current line and add it to the building
-  const finishCurrentLine = () => {
+  const finishCurrentLine = useCallback(() => {
     if (currentLineRef.current && currentLineRef.current.points.length > 1) {
       const updatedLines = [...currentLinesRef.current, currentLineRef.current];
       setCurrentLines(updatedLines);
@@ -472,51 +527,42 @@ export default function App() {
         setMeasurement(formatMeasurement(updatedLines));
       }
     }
-  };
+  }, [updateDrawing, formatMeasurement]);
 
   // Dynamic threshold based on screen pixels and zoom level
-  const getDynamicThreshold = (map: Map, pixelThreshold: number = 10): number => {
-    // Convert pixel distance to geographic distance
+  const getDynamicThreshold = useCallback((map: Map, pixelThreshold: number = 10): number => {
     const center = map.getCenter();
     const zoom = map.getZoom();
     
-    // Calculate the geographic distance per pixel at current zoom level
     const metersPerPixel = 40075016.686 * Math.abs(Math.cos(center.lat * Math.PI / 180)) / Math.pow(2, zoom + 8);
-    
-    // Convert pixel threshold to geographic threshold (in degrees)
-    // Approximate conversion: 1 degree ≈ 111,320 meters at equator
     const degreesPerMeter = 1 / 111320;
     const thresholdInMeters = pixelThreshold * metersPerPixel;
     const thresholdInDegrees = thresholdInMeters * degreesPerMeter;
     
     return thresholdInDegrees;
-  };
+  }, []);
 
-  // Update the isPointNearStart function to use dynamic threshold
-  const isPointNearStart = (map: Map, point: Point, startPoint: Point, pixelThreshold: number = 10): boolean => {
+  const isPointNearStart = useCallback((map: Map, point: Point, startPoint: Point, pixelThreshold: number = 10): boolean => {
     const threshold = getDynamicThreshold(map, pixelThreshold);
     return Math.abs(point.lng - startPoint.lng) < threshold && 
           Math.abs(point.lat - startPoint.lat) < threshold;
-  };
+  }, [getDynamicThreshold]);
 
   // Handle click for building drawing
-  const handleBuildingClick = (point: Point) => {
+  const handleBuildingClick = useCallback((point: Point) => {
     const now = Date.now();
     const isDoubleClick = now - lastClickTime.current < 300;
     lastClickTime.current = now;
 
     if (!currentLineRef.current) {
-      // Start a new line
       startNewLine(point);
     } else {
-      // Check if clicking near start point to close the shape
       const startPoint: Point = {
         lng: currentLineRef.current.points[0][0],
         lat: currentLineRef.current.points[0][1]
       };
 
-      if (isPointNearStart(mapRef.current,point, startPoint) || isDoubleClick) {
-        // Close the current line by adding the start point
+      if (isPointNearStart(mapRef.current!, point, startPoint) || isDoubleClick) {
         const closedLine = {
           ...currentLineRef.current,
           points: [...currentLineRef.current.points, [startPoint.lng, startPoint.lat]]
@@ -531,28 +577,24 @@ export default function App() {
           setMeasurement(formatMeasurement(updatedLines));
         }
       } else {
-        // Add point to current line
         addPointToCurrentLine(point);
       }
     }
-  };
+  }, [startNewLine, isPointNearStart, addPointToCurrentLine, updateDrawing, formatMeasurement]);
 
-  const finishBuilding = () => {
+  const finishBuilding = useCallback(() => {
     if (currentLinesRef.current.length === 0) return;
 
-    // Check each line to see if it forms a closed shape
     const closedShapes: [number, number][][] = [];
     
     currentLinesRef.current.forEach(line => {
       const points = line.points;
       
-      // Check if this line forms a closed shape (first and last points are the same)
       const isClosed = points.length >= 4 && 
         points[0][0] === points[points.length - 1][0] &&
         points[0][1] === points[points.length - 1][1];
       
       if (isClosed) {
-        // Remove duplicate consecutive points and ensure it's a proper polygon
         const uniquePoints: [number, number][] = [];
         points.forEach((point, index) => {
           if (index === 0 || 
@@ -562,7 +604,6 @@ export default function App() {
           }
         });
         
-        // Ensure the polygon is closed (first and last points should be the same)
         if (uniquePoints.length >= 4 && 
             uniquePoints[0][0] === uniquePoints[uniquePoints.length - 1][0] &&
             uniquePoints[0][1] === uniquePoints[uniquePoints.length - 1][1]) {
@@ -572,20 +613,14 @@ export default function App() {
     });
 
     if (closedShapes.length > 0) {
-      // Create a building for each closed shape
       const newBuildings: Building[] = closedShapes.map(polygon => ({
+        id: `building-${Date.now()}-${Math.random()}`,
         height: currentHeight,
         polygon: polygon
       }));
       
-      const updatedBuildings = [...buildingsRef.current, ...newBuildings];
-      setBuildings(updatedBuildings);
+      setBuildings(prev => [...prev, ...newBuildings]);
       
-      if (mapRef.current) {
-        updateBuildingsLayer(mapRef.current, updatedBuildings);
-      }
-      
-      // Clear drawing
       setCurrentLines([]);
       setCurrentLine(null);
       setMeasurement('');
@@ -594,13 +629,8 @@ export default function App() {
       }
       
       setMode("view");
-
-      removeImage()
-      
-      // Show success message
-      // alert(`Successfully created ${newBuildings.length} building(s)!`);
+      removeImage();
     } else {
-      // Check if we have any lines that could form buildings with some adjustments
       const potentialBuildings = currentLinesRef.current.filter(line => 
         line.points.length >= 3
       );
@@ -611,20 +641,19 @@ export default function App() {
         alert('Please create at least one closed shape to form a building. Draw lines that start and end at the same point.');
       }
     }
-  };
+  }, [currentHeight, updateDrawing, removeImage]);
 
-  const clearDrawing = () => {
+  const clearDrawing = useCallback(() => {
     setCurrentLines([]);
     setCurrentLine(null);
     setMeasurement('');
     if (mapRef.current) {
       updateDrawing(mapRef.current, []);
     }
-  };
+  }, [updateDrawing]);
 
-  const undoLastPoint = () => {
+  const undoLastPoint = useCallback(() => {
     if (currentLineRef.current && currentLineRef.current.points.length > 1) {
-      // Remove last point from current line
       const updatedLine = {
         ...currentLineRef.current,
         points: currentLineRef.current.points.slice(0, -1)
@@ -636,7 +665,6 @@ export default function App() {
         setMeasurement(formatMeasurement([...currentLinesRef.current, updatedLine]));
       }
     } else if (currentLinesRef.current.length > 0) {
-      // Remove the last completed line
       const updatedLines = currentLinesRef.current.slice(0, -1);
       setCurrentLines(updatedLines);
       setCurrentLine(null);
@@ -646,37 +674,39 @@ export default function App() {
         setMeasurement(formatMeasurement(updatedLines));
       }
     }
-  };
+  }, [updateDrawing, formatMeasurement]);
 
-  const clearAllBuildings = () => {
+  const clearAllBuildings = useCallback(() => {
     setBuildings([]);
     if (mapRef.current) {
       updateBuildingsLayer(mapRef.current, []);
     }
-  };
+  }, [updateBuildingsLayer]);
 
-  const copyToClipboard = () => {
+  const copyToClipboard = useCallback(() => {
     const code = `const buildingsData: Building[] = ${JSON.stringify(buildings, null, 2)};`;
     navigator.clipboard.writeText(code);
     alert('Building data copied to clipboard!');
-  };
+  }, [buildings]);
 
-  const deleteBuilding = (index: number) => {
-    const updated = buildings.filter((_, idx) => idx !== index);
-    setBuildings(updated);
-    if (mapRef.current) {
-      updateBuildingsLayer(mapRef.current, updated);
-    }
-  };
+  const deleteBuilding = useCallback((id: string) => {
+    setBuildings(prev => prev.filter(b => b.id !== id));
+  }, []);
 
-  // Start building drawing mode
-  const startBuildingDrawing = () => {
+  const startBuildingDrawing = useCallback(() => {
     clearDrawing();
     setMode("drawBuildings");
-  };
+  }, [clearDrawing]);
+
+  // Update buildings when they change
+  useEffect(() => {
+    if (mapRef.current ) {
+      updateBuildingsLayer(mapRef.current, buildings);
+    }
+  }, [buildings, updateBuildingsLayer]);
 
   // Image manipulation functions
-  const enableImageDragResize = (map: Map) => {
+  const enableImageDragResize = useCallback((map: Map) => {
     let dragStart: [number, number] | null = null;
     let isDragging = false;
     let isResizing = false;
@@ -776,7 +806,6 @@ export default function App() {
       const click = e.lngLat.toArray() as [number, number];
       const currentBounds = imageBoundsRef.current;
 
-      // Handle building drawing clicks
       if (modeRef.current === "drawBuildings") {
         const point: Point = { lng: click[0], lat: click[1] };
         handleBuildingClick(point);
@@ -784,7 +813,6 @@ export default function App() {
         return;
       }
 
-      // Only handle image interactions in imageEdit mode
       if (modeRef.current !== "imageEdit" || !uploadedImageRef.current) return;
 
       activeCornerIndex = currentBounds.findIndex(([lng, lat]) =>
@@ -817,11 +845,9 @@ export default function App() {
       const current = e.lngLat.toArray() as [number, number];
       const currentBounds = imageBoundsRef.current;
 
-      // Handle cursor and preview for building drawing
       if (modeRef.current === "drawBuildings") {
         map.getCanvas().style.cursor = 'crosshair';
         
-        // Update preview line
         if (currentLineRef.current) {
           const mousePoint: Point = { lng: current[0], lat: current[1] };
           updatePreviewLine(map, mousePoint);
@@ -829,7 +855,6 @@ export default function App() {
         return;
       }
 
-      // Handle cursor changes for image editing
       if (modeRef.current === "imageEdit" && uploadedImageRef.current) {
         if (!isDragging && !isResizing && !isRotating) {
           const nearCorner = currentBounds.some(([lng, lat]) =>
@@ -850,7 +875,6 @@ export default function App() {
         }
       }
 
-      // Image manipulation logic
       if (isDragging && dragStart) {
         const deltaLng = current[0] - dragStart[0];
         const deltaLat = current[1] - dragStart[1];
@@ -912,12 +936,29 @@ export default function App() {
       }
     };
 
+    // Store event listeners for cleanup
+    eventListenersRef.current = {
+      mousedown: onMouseDown,
+      mousemove: onMouseMove,
+      mouseup: onMouseUp,
+      mouseout: onMouseUp
+    };
+
     map.on('mousedown', onMouseDown);
     map.on('mousemove', onMouseMove);
     map.on('mouseup', onMouseUp);
     map.on('mouseout', onMouseUp);
-  };
 
+    // Return cleanup function
+    return () => {
+      map.off('mousedown', onMouseDown);
+      map.off('mousemove', onMouseMove);
+      map.off('mouseup', onMouseUp);
+      map.off('mouseout', onMouseUp);
+    };
+  }, [handleBuildingClick, updatePreviewLine]);
+
+  // Initialize map
   useEffect(() => {
     if (!mapContainer.current || mapRef.current) return;
 
@@ -931,20 +972,27 @@ export default function App() {
     mapRef.current = map;
 
     map.on("load", () => {
-      // Enable image drag/resize
-      enableImageDragResize(map);
-
-      // Add initial buildings
-      updateBuildingsLayer(map, buildings);
+      // Enable image drag/resize and store cleanup function
+      const cleanup = enableImageDragResize(map);
+      
+      // Store cleanup in ref for later use
+      return cleanup;
     });
 
     return () => {
       if (mapRef.current) {
+        // Clean up event listeners
+        const listeners = eventListenersRef.current;
+        if (listeners.mousedown) mapRef.current.off('mousedown', listeners.mousedown);
+        if (listeners.mousemove) mapRef.current.off('mousemove', listeners.mousemove);
+        if (listeners.mouseup) mapRef.current.off('mouseup', listeners.mouseup);
+        if (listeners.mouseout) mapRef.current.off('mouseout', listeners.mouseout);
+        
         mapRef.current.remove();
         mapRef.current = null;
       }
     };
-  }, []);
+  }, [enableImageDragResize]);
 
   return (
     <div className="w-full h-screen bg-gray-900">
@@ -966,7 +1014,6 @@ export default function App() {
             type="file"
             accept="image/*"
             onChange={handleImageUpload}
-            // value={}
             className="w-full text-white text-sm file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
           />
           {uploadedImageRef.current && (
@@ -1003,17 +1050,17 @@ export default function App() {
           >
             🖼️ Edit Image
           </button>
-          }
-          <button
-            onClick={startBuildingDrawing}
-            className={`px-4 py-2 rounded text-sm font-medium transition-all ${
-              mode === "drawBuildings"
-                ? "bg-indigo-500 text-white shadow-lg"
-                : "bg-gray-700 text-gray-300 hover:bg-gray-600"
-            }`}
-          >
-            🏗️ Draw Buildings
-          </button>
+        }
+        <button
+          onClick={startBuildingDrawing}
+          className={`px-4 py-2 rounded text-sm font-medium transition-all ${
+            mode === "drawBuildings"
+              ? "bg-indigo-500 text-white shadow-lg"
+              : "bg-gray-700 text-gray-300 hover:bg-gray-600"
+          }`}
+        >
+          🏗️ Draw Buildings
+        </button>
       </div>
 
       {/* Building Drawing Panel */}
@@ -1051,6 +1098,21 @@ export default function App() {
           
           {showBuildingPanel && (
             <>
+              {/* Height Control */}
+              <div style={{ marginBottom: '12px' }}>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: '500' }}>
+                  Building Height: {currentHeight}m
+                </label>
+                <input
+                  type="range"
+                  min="5"
+                  max="200"
+                  value={currentHeight}
+                  onChange={(e) => setCurrentHeight(Number(e.target.value))}
+                  style={{ width: '100%' }}
+                />
+              </div>
+
               {/* Drawing Controls */}
               <div style={{ marginBottom: '12px' }}>
                 <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
@@ -1092,15 +1154,15 @@ export default function App() {
                 <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
                   <button
                     onClick={finishBuilding}
-                    disabled={ currentLines.length == 0}
+                    disabled={currentLines.length === 0}
                     style={{
                       flex: 1,
                       padding: '8px',
-                      background: currentLines.length == 0 ? '#e5e7eb' : '#10b981',
-                      color: currentLines.length == 0 ? '#9ca3af' : 'white',
+                      background: currentLines.length === 0 ? '#e5e7eb' : '#10b981',
+                      color: currentLines.length === 0 ? '#9ca3af' : 'white',
                       border: 'none',
                       borderRadius: '6px',
-                      cursor: currentLines.length == 0 ? 'not-allowed' : 'pointer',
+                      cursor: currentLines.length === 0 ? 'not-allowed' : 'pointer',
                       fontSize: '12px',
                       fontWeight: '600'
                     }}
@@ -1145,8 +1207,7 @@ export default function App() {
                     <div>• Click to add points to the line</div>
                     <div>• Click near start point or double-click to close line</div>
                     <div>• Click "Finish Line" to complete current line</div>
-                    <div>• Create at least 3 lines to form a building</div>
-                    <div>• Close the shape to save building</div>
+                    <div>• Create closed lines to form a building</div>
                   </div>
                 </div>
               </div>
@@ -1160,26 +1221,42 @@ export default function App() {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                   <strong style={{ fontSize: '13px' }}>Buildings ({buildings.length})</strong>
                   {buildings.length > 0 && (
-                    <button
-                      onClick={clearAllBuildings}
-                      style={{
-                        padding: '4px 8px',
-                        background: '#ef4444',
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '4px',
-                        cursor: 'pointer',
-                        fontSize: '11px'
-                      }}
-                    >
-                      Clear All
-                    </button>
+                    <div style={{ display: 'flex', gap: '4px' }}>
+                      <button
+                        onClick={copyToClipboard}
+                        style={{
+                          padding: '4px 8px',
+                          background: '#3b82f6',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          fontSize: '11px'
+                        }}
+                      >
+                        📋 Copy
+                      </button>
+                      <button
+                        onClick={clearAllBuildings}
+                        style={{
+                          padding: '4px 8px',
+                          background: '#ef4444',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          fontSize: '11px'
+                        }}
+                      >
+                        Clear All
+                      </button>
+                    </div>
                   )}
                 </div>
                 
                 <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
                   {buildings.map((building, idx) => (
-                    <div key={idx} style={{
+                    <div key={building.id} style={{
                       padding: '8px',
                       background: '#f9fafb',
                       borderRadius: '4px',
@@ -1196,7 +1273,7 @@ export default function App() {
                         </div>
                       </div>
                       <button
-                        onClick={() => deleteBuilding(idx)}
+                        onClick={() => deleteBuilding(building.id)}
                         style={{
                           padding: '4px 8px',
                           background: '#ef4444',
