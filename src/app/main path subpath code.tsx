@@ -767,6 +767,7 @@ export default function App() {
 
         if (mode === "dragNodes") {
           const node = findNodeAtPoint(e.lngLat, nodesRef.current);
+          console.log(nodesRef.current);
           map.getCanvas().style.cursor = node ? "pointer" : "";
         }
       });

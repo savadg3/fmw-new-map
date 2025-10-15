@@ -2,6 +2,7 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import maplibregl, { Map } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+import { findNodeAtPoint } from "./helpers";
 
 declare global {
   interface Window {
@@ -25,7 +26,7 @@ interface Line {
   points: [number, number][];
 }
 
-type Mode = "view" | "drawBuildings" | "imageEdit";
+type Mode = "view" | "drawBuildings" | "imageEdit" | "dragNodes";
 
 // Throttle utility
 function throttle<T extends (...args: any[]) => any>(
@@ -96,6 +97,7 @@ export default function App() {
   const currentLinesRef = useRef<Line[]>(currentLines);
   const currentLineRef = useRef<Line | null>(currentLine);
   const lastClickTime = useRef<number>(0);
+  const draggedNodeRef = useRef<[number, number] | null>(null);
   
   // Event listener cleanup refs
   const eventListenersRef = useRef<{
@@ -154,35 +156,60 @@ export default function App() {
   }, []);
 
   // Calculate image bounds
-  const calculateImageBounds = useCallback((centerLng: number, centerLat: number, imgWidth: number, imgHeight: number, zoom: number) => {
-    const scale = Math.pow(2, 17 - zoom);
+  const calculateImageBounds = useCallback((
+    centerLng: number,
+    centerLat: number,
+    imgWidth: number,
+    imgHeight: number
+  ) => {
+    if (!mapRef.current) return;
+
+    const map = mapRef.current;
+
+    // Get current viewport bounds
+    const bounds = map.getBounds();
+    const viewportWidthDeg = bounds.getEast() - bounds.getWest();
+    const viewportHeightDeg = bounds.getNorth() - bounds.getSouth();
+
     const aspectRatio = imgWidth / imgHeight;
-    
-    let widthDegrees = (imgWidth / 100000) * scale;
-    let heightDegrees = (imgHeight / 100000) * scale;
-    
+
+    // Use 50% of viewport
+    let widthDegrees = viewportWidthDeg * 0.5;
+    let heightDegrees = viewportHeightDeg * 0.5;
+
+    // Scale proportionally to aspect ratio
     if (aspectRatio > 1) {
+      // Wide image
       heightDegrees = widthDegrees / aspectRatio;
+      if (heightDegrees > viewportHeightDeg * 0.5) {
+        heightDegrees = viewportHeightDeg * 0.5;
+        widthDegrees = heightDegrees * aspectRatio;
+      }
     } else {
+      // Tall image
       widthDegrees = heightDegrees * aspectRatio;
+      if (widthDegrees > viewportWidthDeg * 0.5) {
+        widthDegrees = viewportWidthDeg * 0.5;
+        heightDegrees = widthDegrees / aspectRatio;
+      }
     }
-    
+
     const halfWidth = widthDegrees / 2;
     const halfHeight = heightDegrees / 2;
-    
+
+    // Center the image at the map center
     const newBounds: [number, number][] = [
       [centerLng - halfWidth, centerLat + halfHeight],
       [centerLng + halfWidth, centerLat + halfHeight],
       [centerLng + halfWidth, centerLat - halfHeight],
       [centerLng - halfWidth, centerLat - halfHeight],
     ];
-    
+
     imageBoundsRef.current = newBounds;
-    
-    if (mapRef.current) {
-      updateImageSource(mapRef.current, newBounds, uploadedImageRef.current!);
-    }
+
+    updateImageSource(map, newBounds, uploadedImageRef.current!);
   }, []);
+
 
   // Update image source on the map
   const updateImageSource = useCallback((map: Map, bounds: [number, number][], imageUrl: string) => {
@@ -628,7 +655,7 @@ export default function App() {
         updateDrawing(mapRef.current, []);
       }
       
-      setMode("view");
+      // setMode("view");
       removeImage();
     } else {
       const potentialBuildings = currentLinesRef.current.filter(line => 
@@ -694,7 +721,7 @@ export default function App() {
   }, []);
 
   const startBuildingDrawing = useCallback(() => {
-    clearDrawing();
+    // clearDrawing();
     setMode("drawBuildings");
   }, [clearDrawing]);
 
@@ -802,15 +829,50 @@ export default function App() {
       }
     };
 
+
+    let affectedLines: { lineIndex: number; pointIndex: number }[] = [];
+    
     const onMouseDown = (e: maplibregl.MapMouseEvent & maplibregl.EventData) => {
       const click = e.lngLat.toArray() as [number, number];
       const currentBounds = imageBoundsRef.current;
+
+      const isCtrlPressed = e.originalEvent.ctrlKey; // true if Ctrl is pressed
+      const mouseButton = e.originalEvent.button;    // 0 = left, 1 = middle, 2 = right
+  
+      if (mouseButton === 1) {
+        return
+      }
+
+      if (isCtrlPressed) {
+        return
+      }
 
       if (modeRef.current === "drawBuildings") {
         const point: Point = { lng: click[0], lat: click[1] };
         handleBuildingClick(point);
         e.preventDefault();
         return;
+      }
+
+      if (modeRef.current === "dragNodes") {
+        const points = currentLinesRef.current.flatMap(item => item.points);
+        const threshold = getDynamicThreshold(map, 10);
+        const clickedNode = findNodeAtPoint(e.lngLat, points, threshold);
+        if (clickedNode) {
+          draggedNodeRef.current = clickedNode;
+          isDragging = true;
+
+          affectedLines = [];
+          currentLinesRef.current.forEach((line, i) => {
+            line.points.forEach(([lng, lat], j) => {
+              if (Math.abs(lng - clickedNode[0]) < threshold && Math.abs(lat - clickedNode[1]) < threshold) {
+                affectedLines.push({ lineIndex: i, pointIndex: j });
+              }
+            });
+          });
+          map.getCanvas().style.cursor = "grabbing";
+          map.dragPan.disable();
+        }
       }
 
       if (modeRef.current !== "imageEdit" || !uploadedImageRef.current) return;
@@ -841,6 +903,8 @@ export default function App() {
       }
     };
 
+
+    let movedPoints : Line[];
     const onMouseMove = (e: maplibregl.MapMouseEvent & maplibregl.EventData) => {
       const current = e.lngLat.toArray() as [number, number];
       const currentBounds = imageBoundsRef.current;
@@ -873,6 +937,39 @@ export default function App() {
           }
           return;
         }
+      }
+
+      if (isDragging && draggedNodeRef.current) {
+        // const points = currentLinesRef.current;
+        // const oldPoint = draggedNodeRef.current;
+        // const newPoint: [number, number] = [e.lngLat.lng, e.lngLat.lat];
+        // const t = 0.0000001;
+
+        // const updatedLines = currentLinesRef.current.map((line) => {
+        //   const updatedPoints = line.points.map(([lng, lat]) => {
+        //     const isSamePoint =
+        //       Math.abs(lng - oldPoint[0]) < t && Math.abs(lat - oldPoint[1]) < t;
+        //     return isSamePoint ? newPoint : [lng, lat];
+        //   });
+        //   return { ...line, points: updatedPoints };
+        // });
+
+        // if (mapRef.current) {
+        //   updateDrawing(mapRef.current, updatedLines);
+        //   setMeasurement(formatMeasurement(updatedLines));
+        //   // currentLinesRef.current = movedPoints;
+        //   movedPoints = updatedLines
+        // }
+
+        const [newLng, newLat] = [e.lngLat.lng, e.lngLat.lat];
+        const lines = [...currentLinesRef.current];
+
+        for (const { lineIndex, pointIndex } of affectedLines) {
+          lines[lineIndex].points[pointIndex] = [newLng, newLat];
+        }
+
+        movedPoints = lines;
+        updateDrawing(mapRef.current, lines);
       }
 
       if (isDragging && dragStart) {
@@ -925,6 +1022,10 @@ export default function App() {
     const onMouseUp = () => {
       if (isDragging || isResizing || isRotating) {
         enableMapInteractions();
+      }
+      
+      if (draggedNodeRef.current && movedPoints?.length) {
+        currentLinesRef.current = movedPoints
       }
       isDragging = false;
       isResizing = false;
@@ -1061,10 +1162,21 @@ export default function App() {
         >
           🏗️ Draw Buildings
         </button>
+
+        <button
+          onClick={() => setMode("dragNodes")}
+          className={`w-full px-4 py-2 rounded text-sm font-medium transition-all mb-2 ${
+            mode === "dragNodes"
+              ? "bg-yellow-500 text-white shadow-lg"
+              : "bg-gray-700 text-gray-300 hover:bg-gray-600"
+          }`}
+        >
+          🎯 Drag Nodes
+        </button>
       </div>
 
       {/* Building Drawing Panel */}
-      {mode === "drawBuildings" && (
+      {(mode === "drawBuildings" || mode === "dragNodes") && (
         <div style={{
           position: 'absolute',
           top: '10px',
@@ -1099,7 +1211,7 @@ export default function App() {
           {showBuildingPanel && (
             <>
               {/* Height Control */}
-              <div style={{ marginBottom: '12px' }}>
+              {/* <div style={{ marginBottom: '12px' }}>
                 <label style={{ display: 'block', marginBottom: '4px', fontWeight: '500' }}>
                   Building Height: {currentHeight}m
                 </label>
@@ -1111,7 +1223,7 @@ export default function App() {
                   onChange={(e) => setCurrentHeight(Number(e.target.value))}
                   style={{ width: '100%' }}
                 />
-              </div>
+              </div> */}
 
               {/* Drawing Controls */}
               <div style={{ marginBottom: '12px' }}>
