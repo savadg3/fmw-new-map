@@ -26,7 +26,32 @@ interface Line {
   points: [number, number][];
 }
 
-type Mode = "view" | "drawBuildings" | "imageEdit" | "dragNodes";
+interface PathLine {
+  id: number;
+  points: [number, number][];
+  startNode: number;
+  endNode: number;
+  pathType: PathType;
+}
+
+interface CurrentPathLine {
+  start: number;
+  points: [number, number][];
+  nodeIds: number[];
+  pathType: PathType;
+  isContinuingFromLine?: boolean;
+  continuedLineId?: number;
+  splitPoint?: [number, number];
+}
+
+interface Node {
+  id: number;
+  coordinates: [number, number];
+  color: string;
+}
+
+type Mode = "view" | "drawBuildings" | "imageEdit" | "dragNodes" | "drawLines";
+type PathType = "main" | "sub";
 
 // Throttle utility
 function throttle<T extends (...args: any[]) => any>(
@@ -55,25 +80,25 @@ function debounce<T extends (...args: any[]) => any>(
   };
 }
 
+const colors = ["#FF9800"];
+
 export default function App() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<Map | null>(null);
   const [mode, setMode] = useState<Mode>("view");
+  const [currentPathType, setCurrentPathType] = useState<PathType>("main");
 
   // Building drawing state - using array with Map for efficient lookups
   const [buildings, setBuildings] = useState<Building[]>([]);
   const [currentLines, setCurrentLines] = useState<Line[]>([]);
   const [currentLine, setCurrentLine] = useState<Line | null>(null);
-  const [currentHeight, setCurrentHeight] = useState<number>(10);
+  const [currentPathLine, setCurrentPathLine] = useState<CurrentPathLine | null>(null);
   const [measurement, setMeasurement] = useState<string>('');
   const [showBuildingPanel, setShowBuildingPanel] = useState(true);
 
-  // Convert buildings array to Map for O(1) lookups when needed
-  // const buildingsMap = useMemo(() => {
-  //   const map = new Map<string, Building>();
-  //   buildings.forEach(b => map.set(b.id, b));
-  //   return map;
-  // }, [buildings]);
+  const [lines, setLines] = useState<PathLine[]>([]);
+  const [nodes, setNodes] = useState<Node[]>([]);
+
 
   // Image upload and manipulation state
   const uploadedImageRef = useRef<string | null>(null);
@@ -96,6 +121,10 @@ export default function App() {
   const buildingsRef = useRef<Building[]>(buildings);
   const currentLinesRef = useRef<Line[]>(currentLines);
   const currentLineRef = useRef<Line | null>(currentLine);
+  const currentPathLineRef = useRef<CurrentPathLine | null>(currentPathLine);
+  const currentPathTypeRef = useRef<PathType>(currentPathType);
+  const linesRef = useRef<PathLine[]>([]);
+  const nodesRef = useRef<Node[]>([]);
   const lastClickTime = useRef<number>(0);
   const draggedNodeRef = useRef<[number, number] | null>(null);
   
@@ -123,6 +152,14 @@ export default function App() {
   useEffect(() => {
     currentLineRef.current = currentLine;
   }, [currentLine]);
+
+  useEffect(() => {
+    currentPathLineRef.current = currentPathLine;
+  }, [currentPathLine]);
+
+  useEffect(() => {
+    currentPathTypeRef.current = currentPathType;
+  }, [currentPathType]);
 
   // Image upload handler
   const handleImageUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
@@ -459,6 +496,44 @@ export default function App() {
     []
   );
 
+
+  const updatePreviewPathLine = useMemo(
+    () => throttle((
+      map: any,
+      points: [number, number][] | null,
+      pathType?: PathType
+    ) => {
+
+      console.log({points,pathType});
+      if (!points) {
+        map.getSource("preview-line")?.setData({
+          type: "FeatureCollection",
+          features: [],
+        });
+        return;
+      }
+
+      const isMain = pathType === "main";
+      map.getSource("preview-line")?.setData({
+        type: "FeatureCollection",
+        features: [
+          {
+            type: "Feature",
+            geometry: { type: "LineString", coordinates: points },
+            properties: {
+              borderColor: isMain ? "#1e5a99" : "#2d7a4a",
+              mainColor: isMain ? "#4285f4" : "#34a853",
+              borderWidth: isMain ? 10 : 8,
+              mainWidth: isMain ? 8 : 6,
+            },
+          },
+        ],
+      });
+    }, 16),
+    []
+  );
+
+
   // Update buildings layer - OPTIMIZED with setData
   const updateBuildingsLayer = useCallback((map: Map, buildingsList: Building[]) => {
     const buildingsSource = map.getSource(buildingsSourceId) as maplibregl.GeoJSONSource;
@@ -642,7 +717,7 @@ export default function App() {
     if (closedShapes.length > 0) {
       const newBuildings: Building[] = closedShapes.map(polygon => ({
         id: `building-${Date.now()}-${Math.random()}`,
-        height: currentHeight,
+        height: 10,
         polygon: polygon
       }));
       
@@ -668,7 +743,7 @@ export default function App() {
         alert('Please create at least one closed shape to form a building. Draw lines that start and end at the same point.');
       }
     }
-  }, [currentHeight, updateDrawing, removeImage]);
+  }, [updateDrawing, removeImage]);
 
   const clearDrawing = useCallback(() => {
     setCurrentLines([]);
@@ -847,6 +922,199 @@ export default function App() {
         return
       }
 
+      if (modeRef.current === "drawLines") {
+        const now = Date.now();
+        const isDoubleClick = now - lastClickTime.current < 300;
+        lastClickTime.current = now;
+
+        // Handle double click to finish drawing
+        if (isDoubleClick && currentPathLineRef.current) {
+          // Only finish if we have at least 2 points (a valid line)
+          if (currentPathLineRef.current.points.length >= 2) {
+            const finalLine: PathLine = {
+              id: Date.now(),
+              points: currentPathLineRef.current.points,
+              startNode: currentPathLineRef.current.nodeIds[0],
+              endNode: currentPathLineRef.current.nodeIds[currentPathLineRef.current.nodeIds.length - 1],
+              pathType: currentPathLineRef.current.pathType,
+            };
+            
+            const updatedLines = [...linesRef.current, finalLine];
+            setLines(updatedLines);
+            linesRef.current = updatedLines;
+            
+            updateLinesOnMap(map, updatedLines);
+          }
+          
+          finishCurrentLine();
+          return;
+        }
+
+        const threshold = getDynamicThreshold(map, 10);
+        const clickedNode = findNodeAtPathPoint(e.lngLat, nodesRef.current);
+        const clickedLineInfo = findLineAtPoint(e.lngLat, linesRef.current);
+
+        // Handle connecting to existing nodes or lines
+        if (currentPathLineRef.current && (clickedLineInfo || (clickedNode && clickedNode.id !== currentPathLineRef.current.start))) {
+          let endNode: Node;
+          
+          if (clickedNode && clickedNode.id !== currentPathLineRef.current.start) {
+            endNode = clickedNode;
+          } else if (clickedLineInfo) {
+            const { line, closestPoint, segmentIndex } = clickedLineInfo;
+            
+            endNode = {
+              id: Date.now(),
+              coordinates: [closestPoint[0], closestPoint[1]],
+              color: colors[nodesRef.current.length % colors.length],
+            };
+            
+            const splitLines = splitLineAtPoint(line, closestPoint, segmentIndex, endNode.id);
+            const updatedLines = linesRef.current.filter(l => l.id !== line.id);
+            updatedLines.push(...splitLines);
+            const updatedNodes = [...nodesRef.current, endNode];
+            
+            setNodes(updatedNodes);
+            nodesRef.current = updatedNodes;
+            setLines(updatedLines);
+            linesRef.current = updatedLines;
+            
+            updateNodesOnMap(map, updatedNodes);
+            updateLinesOnMap(map, updatedLines);
+          } else {
+            return;
+          }
+          
+          const finalLine: PathLine = {
+            id: Date.now(),
+            points: [
+              ...currentPathLineRef.current.points,
+              endNode.coordinates
+            ],
+            startNode: currentPathLineRef.current.nodeIds[0],
+            endNode: endNode.id,
+            pathType: currentPathLineRef.current.pathType,
+          };
+          
+          const updatedLines = [...linesRef.current, finalLine];
+          setLines(updatedLines);
+          linesRef.current = updatedLines;
+          finishCurrentLine();
+          updateLinesOnMap(map, updatedLines);
+          return;
+        }
+
+        // Handle starting from an existing line
+        if (clickedLineInfo && !clickedNode && !currentPathLineRef.current) {
+          const { line, closestPoint, segmentIndex } = clickedLineInfo;
+          
+          const splitNode: Node = {
+            id: Date.now(),
+            coordinates: [closestPoint[0], closestPoint[1]],
+            color: colors[nodesRef.current.length % colors.length],
+          };
+          
+          const splitLines = splitLineAtPoint(line, closestPoint, segmentIndex, splitNode.id);
+          const updatedLines = linesRef.current.filter(l => l.id !== line.id);
+          updatedLines.push(...splitLines);
+          const updatedNodes = [...nodesRef.current, splitNode];
+          
+          setNodes(updatedNodes);
+          nodesRef.current = updatedNodes;
+          setLines(updatedLines);
+          linesRef.current = updatedLines;
+          
+          const newCurrentLine: CurrentPathLine = {
+            start: splitNode.id,
+            points: [splitNode.coordinates],
+            nodeIds: [splitNode.id],
+            pathType: currentPathTypeRef.current,
+            isContinuingFromLine: true,
+            continuedLineId: line.id,
+            splitPoint: closestPoint
+          };
+          
+          setCurrentPathLine(newCurrentLine);
+          currentPathLineRef.current = newCurrentLine;
+          updateNodesOnMap(map, updatedNodes);
+          updateLinesOnMap(map, updatedLines);
+          updateHighlightLine(map, line.points);
+          return;
+        }
+
+        // Handle normal drawing flow
+        if (clickedNode) {
+          if (!currentPathLineRef.current) {
+            // Start new line from existing node
+            const newCurrentLine = {
+              start: clickedNode.id,
+              points: [clickedNode.coordinates],
+              nodeIds: [clickedNode.id],
+              pathType: currentPathTypeRef.current,
+            };
+            setCurrentPathLine(newCurrentLine);
+            currentPathLineRef.current = newCurrentLine;
+          } else {
+            // Continue line to existing node
+            if (clickedNode.id !== currentPathLineRef.current.nodeIds[currentPathLineRef.current.nodeIds.length - 1]) {
+              const newLine: PathLine = {
+                id: Date.now(),
+                points: [
+                  ...currentPathLineRef.current.points,
+                  clickedNode.coordinates
+                ],
+                startNode: currentPathLineRef.current.nodeIds[0],
+                endNode: clickedNode.id,
+                pathType: currentPathLineRef.current.pathType,
+              };
+              const updatedLines = [...linesRef.current, newLine];
+              setLines(updatedLines);
+              linesRef.current = updatedLines;
+              updateLinesOnMap(map, updatedLines);
+              finishCurrentLine();
+            }
+          }
+        } else {
+          // Create new node and continue drawing
+          const newNode: Node = {
+            id: Date.now(),
+            coordinates: [e.lngLat.lng, e.lngLat.lat],
+            color: colors[nodesRef.current.length % colors.length],
+          };
+          const updatedNodes = [...nodesRef.current, newNode];
+          setNodes(updatedNodes);
+          nodesRef.current = updatedNodes;
+          updateNodesOnMap(map, updatedNodes);
+
+
+          if (!currentPathLineRef.current) {
+            // Start new line
+            const newCurrentLine = {
+              start: newNode.id,
+              points: [newNode.coordinates],
+              nodeIds: [newNode.id],
+              pathType: currentPathTypeRef.current,
+            };
+            setCurrentPathLine(newCurrentLine);
+            currentPathLineRef.current = newCurrentLine;
+          } else {
+            // Continue existing line
+            const updatedCurrentLine = {
+              ...currentPathLineRef.current,
+              points: [...currentPathLineRef.current.points, newNode.coordinates],
+              nodeIds: [...currentPathLineRef.current.nodeIds, newNode.id],
+            };
+
+            setCurrentPathLine(updatedCurrentLine);
+            currentPathLineRef.current = updatedCurrentLine;
+            
+            // Update preview line in real-time
+            updatePreviewLineDuringDrawing(map, updatedCurrentLine, e.lngLat);
+          }
+        }
+        return
+      }
+
       if (modeRef.current === "drawBuildings") {
         const point: Point = { lng: click[0], lat: click[1] };
         handleBuildingClick(point);
@@ -940,27 +1208,6 @@ export default function App() {
       }
 
       if (isDragging && draggedNodeRef.current) {
-        // const points = currentLinesRef.current;
-        // const oldPoint = draggedNodeRef.current;
-        // const newPoint: [number, number] = [e.lngLat.lng, e.lngLat.lat];
-        // const t = 0.0000001;
-
-        // const updatedLines = currentLinesRef.current.map((line) => {
-        //   const updatedPoints = line.points.map(([lng, lat]) => {
-        //     const isSamePoint =
-        //       Math.abs(lng - oldPoint[0]) < t && Math.abs(lat - oldPoint[1]) < t;
-        //     return isSamePoint ? newPoint : [lng, lat];
-        //   });
-        //   return { ...line, points: updatedPoints };
-        // });
-
-        // if (mapRef.current) {
-        //   updateDrawing(mapRef.current, updatedLines);
-        //   setMeasurement(formatMeasurement(updatedLines));
-        //   // currentLinesRef.current = movedPoints;
-        //   movedPoints = updatedLines
-        // }
-
         const [newLng, newLat] = [e.lngLat.lng, e.lngLat.lat];
         const lines = [...currentLinesRef.current];
 
@@ -970,6 +1217,14 @@ export default function App() {
 
         movedPoints = lines;
         updateDrawing(mapRef.current, lines);
+      }
+
+      if (modeRef.current === "drawLines" && currentPathLineRef.current) {
+        const previewPoints = [
+          ...currentPathLineRef.current.points,
+          [e.lngLat.lng, e.lngLat.lat],
+        ];
+        updatePreviewPathLine(map, previewPoints, currentPathLineRef.current.pathType); 
       }
 
       if (isDragging && dragStart) {
@@ -1095,6 +1350,195 @@ export default function App() {
     };
   }, [enableImageDragResize]);
 
+
+  function updateHighlightLine(
+    map: any,
+    points: [number, number][] | null
+  ) {
+    if (!points) {
+      map.getSource("highlight-line")?.setData({
+        type: "FeatureCollection",
+        features: [],
+      });
+      return;
+    }
+
+    map.getSource("highlight-line")?.setData({
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          geometry: { type: "LineString", coordinates: points },
+        },
+      ],
+    });
+  }
+
+  function updatePreviewLineDuringDrawing(map: any, currentLine: CurrentPathLine | null, mouseLngLat: { lng: number; lat: number } | null) {
+    if (!currentLine || !mouseLngLat) {
+      updatePreviewLine(map, null);
+      return;
+    }
+
+    const previewPoints = [
+      ...currentLine.points,
+      [mouseLngLat.lng, mouseLngLat.lat] as [number, number]
+    ];
+
+    updatePreviewPathLine(map, previewPoints, currentLine.pathType);
+  }
+
+  function updateLinesOnMap(map: any, list: PathLine[]) {
+    const mainLines = list.filter((l) => l.pathType === "main");
+    const subLines = list.filter((l) => l.pathType === "sub");
+
+    const mainFeatures = mainLines.map((l) => ({
+      type: "Feature",
+      geometry: { type: "LineString", coordinates: l.points },
+      properties: { id: l.id },
+    }));
+
+    const subFeatures = subLines.map((l) => ({
+      type: "Feature",
+      geometry: { type: "LineString", coordinates: l.points },
+      properties: { id: l.id },
+    }));
+
+    map.getSource("main-lines")?.setData({
+      type: "FeatureCollection",
+      features: mainFeatures,
+    });
+
+    map.getSource("sub-lines")?.setData({
+      type: "FeatureCollection",
+      features: subFeatures,
+    });
+  }
+
+  function findLineAtPoint(
+    lngLat: { lng: number; lat: number },
+    linesList: Line[]
+  ): { line: Line; closestPoint: [number, number]; segmentIndex: number } | undefined {
+    const tolerance = 0.00005;
+    
+    let closestLine: Line | undefined;
+    let closestPoint: [number, number] | undefined;
+    let closestSegmentIndex = -1;
+    let minDistance = tolerance;
+
+    linesList.forEach(line => {
+      for (let i = 0; i < line.points.length - 1; i++) {
+        const p1 = line.points[i];
+        const p2 = line.points[i + 1];
+        
+        const A = lngLat.lng - p1[0];
+        const B = lngLat.lat - p1[1];
+        const C = p2[0] - p1[0];
+        const D = p2[1] - p1[1];
+        
+        const dot = A * C + B * D;
+        const lenSq = C * C + D * D;
+        let param = -1;
+        
+        if (lenSq !== 0) {
+          param = dot / lenSq;
+        }
+        
+        let xx, yy;
+        
+        if (param < 0) {
+          xx = p1[0];
+          yy = p1[1];
+        } else if (param > 1) {
+          xx = p2[0];
+          yy = p2[1];
+        } else {
+          xx = p1[0] + param * C;
+          yy = p1[1] + param * D;
+        }
+        
+        const dx = lngLat.lng - xx;
+        const dy = lngLat.lat - yy;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        if (distance < minDistance) {
+          minDistance = distance;
+          closestLine = line;
+          closestPoint = [xx, yy] as [number, number];
+          closestSegmentIndex = i;
+        }
+      }
+    });
+
+    if (closestLine && closestPoint) {
+      return {
+        line: closestLine,
+        closestPoint,
+        segmentIndex: closestSegmentIndex
+      };
+    }
+    
+    return undefined;
+  }
+
+  function splitLineAtPoint(
+    line: PathLine, 
+    splitPoint: [number, number], 
+    segmentIndex: number,
+    newNodeId: number
+  ): PathLine[] {
+    const firstSegmentPoints = [
+      ...line.points.slice(0, segmentIndex + 1),
+      splitPoint
+    ];
+    
+    const secondSegmentPoints = [
+      splitPoint,
+      ...line.points.slice(segmentIndex + 1)
+    ];
+
+    const firstSegment: PathLine = {
+      id: Date.now(),
+      points: firstSegmentPoints,
+      startNode: line.startNode,
+      endNode: newNodeId,
+      pathType: line.pathType
+    };
+
+    const secondSegment: PathLine = {
+      id: Date.now() + 1,
+      points: secondSegmentPoints,
+      startNode: newNodeId,
+      endNode: line.endNode,
+      pathType: line.pathType
+    };
+
+    return [firstSegment, secondSegment];
+  }
+
+  function updateNodesOnMap(map: any, list: Node[]) {
+    const features = list.map((n) => ({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: n.coordinates },
+      properties: { color: n.color, id: n.id },
+    }));
+    map.getSource("nodes")?.setData({
+      type: "FeatureCollection",
+      features,
+    });
+  }
+
+  function findNodeAtPathPoint(
+    lngLat: { lng: number; lat: number },
+    nodesList: Node[]
+  ): Node | undefined {
+    const t = 0.00008;
+    return nodesList.find(
+      (n) =>
+        Math.abs(n.coordinates[0] - lngLat.lng) < t &&
+        Math.abs(n.coordinates[1] - lngLat.lat) < t
+    );
+  }
   return (
     <div className="w-full h-screen bg-gray-900">
       {/* Main Tools Panel */}
@@ -1173,6 +1617,51 @@ export default function App() {
         >
           🎯 Drag Nodes
         </button>
+
+        <button
+            onClick={() => {
+              setMode("drawLines");
+              setCurrentLine(null);
+              if (mapRef.current) {
+                updateHighlightLine(mapRef.current, null); 
+              }
+            }}
+            className={`w-full px-4 py-2 rounded text-sm font-medium transition-all mb-2 ${
+              mode === "drawLines"
+                ? "bg-blue-500 text-white shadow-lg"
+                : "bg-gray-700 text-gray-300 hover:bg-gray-600"
+            }`}
+          >
+            ✏️ Draw Roads
+          </button>
+
+          {mode === "drawLines" && (
+            <div className="ml-2 flex flex-col gap-2 border-l-2 border-gray-600 pl-3 mb-2">
+              <div className="text-xs text-gray-400 font-semibold uppercase">
+                Path Type
+              </div>
+              <button
+                onClick={() => setCurrentPathType("main")}
+                className={`px-3 py-2 rounded text-xs font-medium transition-all ${
+                  currentPathType === "main"
+                    ? "bg-blue-500 text-white shadow-lg"
+                    : "bg-gray-700 text-gray-300 hover:bg-gray-600"
+                }`}
+              >
+                🔵 Main Path
+              </button>
+              <button
+                onClick={() => setCurrentPathType("sub")}
+                className={`px-3 py-2 rounded text-xs font-medium transition-all ${
+                  currentPathType === "sub"
+                    ? "bg-green-500 text-white shadow-lg"
+                    : "bg-gray-700 text-gray-300 hover:bg-gray-600"
+                }`}
+              >
+                🟢 Sub Path
+              </button>
+            </div>
+          )}
       </div>
 
       {/* Building Drawing Panel */}
@@ -1210,20 +1699,6 @@ export default function App() {
           
           {showBuildingPanel && (
             <>
-              {/* Height Control */}
-              {/* <div style={{ marginBottom: '12px' }}>
-                <label style={{ display: 'block', marginBottom: '4px', fontWeight: '500' }}>
-                  Building Height: {currentHeight}m
-                </label>
-                <input
-                  type="range"
-                  min="5"
-                  max="200"
-                  value={currentHeight}
-                  onChange={(e) => setCurrentHeight(Number(e.target.value))}
-                  style={{ width: '100%' }}
-                />
-              </div> */}
 
               {/* Drawing Controls */}
               <div style={{ marginBottom: '12px' }}>
