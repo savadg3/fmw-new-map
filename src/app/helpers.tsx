@@ -13,8 +13,6 @@ export function findNodeAtPoint(
   );
 }
 
-
-
 export function generateTestData(count = 500) {
   const result = [];
 

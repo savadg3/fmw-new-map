@@ -1,10 +1,12 @@
 import { configureStore } from '@reduxjs/toolkit';
 import locationReducer from './slices/locationSlice';
+import mapReducer from './slices/mapSlices';
 
 export const makeStore = () => {
   return configureStore({
     reducer: {
       location: locationReducer,
+      map: mapReducer,
     },
     middleware: (getDefaultMiddleware) =>
       getDefaultMiddleware({

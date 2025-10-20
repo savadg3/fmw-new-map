@@ -1,7 +1,10 @@
 "use client";
 import { useAppSelector } from "@/store/hooks";
-import { Map } from "maplibre-gl";
+import { RootState } from "@/store/store";
+import { Map as MapLibreMap } from "maplibre-gl";
+import { useRouter } from "next/navigation";
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useSelector } from "react-redux";
 
 declare global {
   interface Window {
@@ -89,6 +92,10 @@ const buildingsData: Building[] = [
 
 export default function NavigatorPage() {
   const { selectedLocation } = useAppSelector((state) => state.location);
+  const router = useRouter();
+  const { center, zoom, pitch, bearing } = useSelector(
+    (state: RootState) => state.map
+  );
 
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<any>(null);
@@ -181,44 +188,49 @@ export default function NavigatorPage() {
       link.href = "https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css";
       link.rel = "stylesheet";
       document.head.appendChild(link);
+
+      if (center.every(v => v === 0)) {
+        router.push("/")
+      }
       
       const maplibregl = window.maplibregl;
       const map = new maplibregl.Map({
         container: mapContainer.current,
         style:
         "https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json",
-        center: [-74.0179, 40.706],
-        zoom: 17,
-        pitch: 0,
-        bearing: 0,
+        center: center ,
+        zoom: zoom,
+        pitch: pitch,
+        bearing: bearing,
       });
       
       mapRef.current = map;
       
-      if(selectedLocation){
-        const { longitude, latitude } = selectedLocation;
-        map.setCenter([longitude, latitude]);
-      }else if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(
-          (position) => {
-            const { longitude, latitude } = position.coords;
+      // if(selectedLocation){
+      //   const { longitude, latitude } = selectedLocation;
+      //   console.log({longitude, latitude});
+      //   map.setCenter([longitude, latitude]);
+      // }else if (navigator.geolocation) {
+      //   navigator.geolocation.getCurrentPosition(
+      //     (position) => {
+      //       const { longitude, latitude } = position.coords;
             
-            // Center the map on user's location
-            map.setCenter([longitude, latitude]);
+      //       // Center the map on user's location
+      //       map.setCenter([longitude, latitude]);
             
-            // Add a marker for current location
-            // new maplibregl.Marker({ color: "blue" })
-            //   .setLngLat([longitude, latitude])
-            //   .setPopup(new maplibregl.Popup().setText("You are here"))
-            //   .addTo(map);
-          },
-          (error) => {
-            console.error("Error getting location:", error);
-          }
-        );
-      } else {
-        console.warn("Geolocation not supported");
-      }
+      //       // Add a marker for current location
+      //       // new maplibregl.Marker({ color: "blue" })
+      //       //   .setLngLat([longitude, latitude])
+      //       //   .setPopup(new maplibregl.Popup().setText("You are here"))
+      //       //   .addTo(map);
+      //     },
+      //     (error) => {
+      //       console.error("Error getting location:", error);
+      //     }
+      //   );
+      // } else {
+      //   console.warn("Geolocation not supported");
+      // }
       
       map.on("load", () => {
         // Add building extrusions
@@ -849,7 +861,7 @@ export default function NavigatorPage() {
   }, [selectedLocation]);
 
   // Dynamic threshold based on screen pixels and zoom level
-    const getDynamicThreshold = useCallback((map: Map, pixelThreshold: number = 10): number => {
+    const getDynamicThreshold = useCallback((map: MapLibreMap, pixelThreshold: number = 10): number => {
       const center = map.getCenter();
       const zoom = map.getZoom();
       
@@ -1223,7 +1235,7 @@ export default function NavigatorPage() {
       const prev = previous.get(current);
       if (prev && prev.edge) {
         // Find the line for this edge
-        const line = linesRef.current.find(l => l.id === prev.edge.lineId);
+        const line = linesRef.current.find(l => l.id === prev.edge?.lineId);
         if (line) {
           pathLines.unshift(line);
         }
@@ -1373,7 +1385,7 @@ export default function NavigatorPage() {
               : "bg-purple-500 text-white hover:bg-purple-600"
             }`}
           >
-              {isFindingPath ? "Finding Path..." : " Find Shortest Path"}
+              {isFindingPath ? "Finding Path..." : " Find Shortest Path"} 
           </button>)}
 
           {(mode === "selectStartNode" || mode === "selectEndNode") && (
@@ -1423,6 +1435,7 @@ export default function NavigatorPage() {
               startNodeRef.current = null;
               endNodeRef.current = null;
               shortestPathRef.current = null;
+              setIsFindingPath(false)
               if (mapRef.current) {
                 updateLinesOnMap(mapRef.current, []);
                 updateNodesOnMap(mapRef.current, []);

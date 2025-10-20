@@ -5,6 +5,9 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { findNodeAtPoint } from "../helpers";
 import { useRouter } from "next/navigation";
 import { useAppSelector } from "@/store/hooks";
+import { useDispatch, useSelector } from "react-redux";
+import { AppDispatch, RootState } from "@/store/store";
+import { setMapState } from "@/store/slices/mapSlices";
 
 declare global {
   interface Window {
@@ -87,6 +90,10 @@ const colors = ["#FF9800"];
 export default function FloorPlanPage() {
   const router = useRouter();
   const { selectedLocation } = useAppSelector((state) => state.location);
+  const dispatch = useDispatch<AppDispatch>();
+  const { center, zoom, pitch, bearing } = useSelector(
+    (state: RootState) => state.map
+  );
   
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<Map | null>(null);
@@ -131,6 +138,7 @@ export default function FloorPlanPage() {
     mousemove?: (e: any) => void;
     mouseup?: (e: any) => void;
     mouseout?: (e: any) => void;
+    mousemoveend?: (e: any) => void;
   }>({});
   
   // Update refs when state changes
@@ -144,6 +152,7 @@ export default function FloorPlanPage() {
   
   useEffect(() => {
     currentLinesRef.current = currentLines;
+    
   }, [currentLines]);
   
   useEffect(() => {
@@ -171,8 +180,7 @@ export default function FloorPlanPage() {
         
         if (mapRef.current) {
           const center = mapRef.current.getCenter();
-          const zoom = mapRef.current.getZoom();
-          calculateImageBounds(center.lng, center.lat, img.width, img.height, zoom);
+          calculateImageBounds(center.lng, center.lat, img.width, img.height);
         }
       };
       img.src = imageUrl;
@@ -224,7 +232,7 @@ export default function FloorPlanPage() {
     const halfHeight = heightDegrees / 2;
     
     // Center the image at the map center
-    const newBounds: [number, number][] = [
+    const newBounds: [[number, number], [number, number], [number, number], [number, number]] = [
       [centerLng - halfWidth, centerLat + halfHeight],
       [centerLng + halfWidth, centerLat + halfHeight],
       [centerLng + halfWidth, centerLat - halfHeight],
@@ -238,7 +246,8 @@ export default function FloorPlanPage() {
   
   
   // Update image source on the map
-  const updateImageSource = useCallback((map: Map, bounds: [number, number][], imageUrl: string) => {
+  // const updateImageSource = useCallback((map: Map, bounds: [number, number][], imageUrl: string) => {
+  const updateImageSource = useCallback((map: Map, bounds: [[number, number], [number, number], [number, number], [number, number]], imageUrl: string) => {
     if (map.getLayer(imageId)) map.removeLayer(imageId);
     if (map.getSource(imageId)) map.removeSource(imageId);
     
@@ -436,6 +445,8 @@ export default function FloorPlanPage() {
   // Update preview line when mouse moves - THROTTLED
   const updatePreviewLine = useMemo(
     () => throttle((map: Map, mousePoint: Point | null) => {
+
+      
       if (!currentLineRef.current || !mousePoint) {
         const previewSource = map.getSource(previewSourceId) as maplibregl.GeoJSONSource;
         if (previewSource) {
@@ -546,7 +557,7 @@ export default function FloorPlanPage() {
         }
       });
     }
-  }, []);
+  }, []); 
   
   // Start drawing a new line
   const startNewLine = useCallback((point: Point) => {
@@ -561,7 +572,7 @@ export default function FloorPlanPage() {
   const addPointToCurrentLine = useCallback((point: Point) => {
     if (!currentLineRef.current) return;
     
-    const updatedLine = {
+    const updatedLine: Line  = {
       ...currentLineRef.current,
       points: [...currentLineRef.current.points, [point.lng, point.lat]]
     };
@@ -607,6 +618,9 @@ export default function FloorPlanPage() {
     const isDoubleClick = now - lastClickTime.current < 300;
     lastClickTime.current = now;
     
+
+    
+
     if (!currentLineRef.current) {
       startNewLine(point);
     } else {
@@ -616,17 +630,19 @@ export default function FloorPlanPage() {
       };
       
       if (isPointNearStart(mapRef.current!, point, startPoint) || isDoubleClick) {
-        const closedLine = {
+        const closedLine: Line  = {
           ...currentLineRef.current,
           points: [...currentLineRef.current.points, [startPoint.lng, startPoint.lat]]
         };
         
+        
         const updatedLines = [...currentLinesRef.current, closedLine];
+        
         setCurrentLines(updatedLines);
         setCurrentLine(null);
         
         if (mapRef.current) {
-          updateDrawing(mapRef.current, updatedLines);
+          updateDrawing(mapRef.current, updatedLines); 
           setMeasurement(formatMeasurement(updatedLines));
         }
       } else {
@@ -665,12 +681,18 @@ export default function FloorPlanPage() {
           }
         });
         
+        
+
+        // return
+
         if (closedShapes.length > 0) {
           const newBuildings: Building[] = closedShapes.map(polygon => ({
             id: `building-${Date.now()}-${Math.random()}`,
             height: 10,
             polygon: polygon
           }));
+
+          
           
           setBuildings(prev => [...prev, ...newBuildings]);
           
@@ -847,7 +869,7 @@ export default function FloorPlanPage() {
           ];
         };
         
-        const updateImageBounds = (bounds: [number, number][]) => {
+        const updateImageBounds = (bounds: [[number, number], [number, number], [number, number], [number, number]]) => {
           imageBoundsRef.current = bounds;
           const src = map.getSource(imageId) as maplibregl.ImageSource;
           if (src && src.setCoordinates) {
@@ -858,7 +880,7 @@ export default function FloorPlanPage() {
         
         let affectedLines: { lineIndex: number; pointIndex: number }[] = [];
         
-        const onMouseDown = (e: maplibregl.MapMouseEvent & maplibregl.EventData) => {
+        const onMouseDown = (e: maplibregl.MapMouseEvent) => {
           const click = e.lngLat.toArray() as [number, number];
           const currentBounds = imageBoundsRef.current;
           
@@ -880,7 +902,9 @@ export default function FloorPlanPage() {
             return;
           }
           
-          if (modeRef.current === "dragNodes") {
+          if (modeRef.current === "dragNodes") { 
+            
+            
             const points = currentLinesRef.current.flatMap(item => item.points);
             const threshold = getDynamicThreshold(map, 10);
             const clickedNode = findNodeAtPoint(e.lngLat, points, threshold);
@@ -889,6 +913,7 @@ export default function FloorPlanPage() {
               isDragging = true;
               
               affectedLines = [];
+              
               currentLinesRef.current.forEach((line, i) => {
                 line.points.forEach(([lng, lat], j) => {
                   if (Math.abs(lng - clickedNode[0]) < threshold && Math.abs(lat - clickedNode[1]) < threshold) {
@@ -896,6 +921,8 @@ export default function FloorPlanPage() {
                   }
                 });
               });
+              
+
               map.getCanvas().style.cursor = "grabbing";
               map.dragPan.disable();
             }
@@ -931,7 +958,7 @@ export default function FloorPlanPage() {
       
       
       let movedPoints : Line[];
-      const onMouseMove = (e: maplibregl.MapMouseEvent & maplibregl.EventData) => {
+      const onMouseMove = (e: maplibregl.MapMouseEvent) => {
         const current = e.lngLat.toArray() as [number, number];
         const currentBounds = imageBoundsRef.current;
         
@@ -949,80 +976,97 @@ export default function FloorPlanPage() {
           if (!isDragging && !isResizing && !isRotating) {
             const nearCorner = currentBounds.some(([lng, lat]) =>
               Math.abs(lng - current[0]) < cornerThreshold &&
-            Math.abs(lat - current[1]) < cornerThreshold
-          );
-          
-          if (nearCorner) {
-            map.getCanvas().style.cursor = 'nwse-resize';
-          } else if (isPointNearEdge(current, currentBounds)) {
-            map.getCanvas().style.cursor = 'crosshair';
-          } else if (isPointInBounds(current, currentBounds)) {
-            map.getCanvas().style.cursor = 'move';
-          } else {
-            map.getCanvas().style.cursor = '';
+              Math.abs(lat - current[1]) < cornerThreshold
+            );
+            
+            if (nearCorner) {
+              map.getCanvas().style.cursor = 'nwse-resize';
+            } else if (isPointNearEdge(current, currentBounds)) {
+              map.getCanvas().style.cursor = 'crosshair';
+            } else if (isPointInBounds(current, currentBounds)) {
+              map.getCanvas().style.cursor = 'move';
+            } else {
+              map.getCanvas().style.cursor = '';
+            }
+            return;
           }
-          return;
         }
-      }
       
-      if (isDragging && draggedNodeRef.current) {
-        const [newLng, newLat] = [e.lngLat.lng, e.lngLat.lat];
-        const lines = [...currentLinesRef.current];
         
-        for (const { lineIndex, pointIndex } of affectedLines) {
-          lines[lineIndex].points[pointIndex] = [newLng, newLat];
+        if (isDragging && draggedNodeRef.current) {
+          const [newLng, newLat] = [e.lngLat.lng, e.lngLat.lat];
+          const lines = [...currentLinesRef.current];
+          
+
+          
+          for (const { lineIndex, pointIndex } of affectedLines) {
+            lines[lineIndex].points[pointIndex] = [newLng, newLat];
+          }
+          
+          
+          movedPoints = lines;
+          if (mapRef.current) {
+            updateDrawing(mapRef.current, lines);
+          }
         }
         
-        movedPoints = lines;
-        updateDrawing(mapRef.current, lines);
-      }
-      
-      if (isDragging && dragStart) {
-        const deltaLng = current[0] - dragStart[0];
-        const deltaLat = current[1] - dragStart[1];
-        const moved = currentBounds.map(([lng, lat]) => [lng + deltaLng, lat + deltaLat]) as [number, number][];
+        if (isDragging && dragStart) {
+          const deltaLng = current[0] - dragStart[0];
+          const deltaLat = current[1] - dragStart[1];
+          const moved = currentBounds.map(([lng, lat]) => [lng + deltaLng, lat + deltaLat]) as [[number, number], [number, number], [number, number], [number, number]];
+          
+          updateImageBounds(moved);
+          dragStart = current;
+        }
         
-        updateImageBounds(moved);
-        dragStart = current;
-      }
-      
-      if (isResizing && activeCornerIndex !== null) {
-        const center = getCenter(currentBounds);
-        const dx = current[0] - center[0];
-        const dy = current[1] - center[1];
-        const newDist = Math.sqrt(dx * dx + dy * dy);
+        if (isResizing && activeCornerIndex !== null) {
+          const center = getCenter(currentBounds);
+          const dx = current[0] - center[0];
+          const dy = current[1] - center[1];
+          const newDist = Math.sqrt(dx * dx + dy * dy);
+          
+          const origDx = currentBounds[activeCornerIndex][0] - center[0];
+          const origDy = currentBounds[activeCornerIndex][1] - center[1];
+          const origDist = Math.sqrt(origDx * origDx + origDy * origDy);
+          
+          const scale = newDist / origDist;
+          
+          // const updated = currentBounds.map(corner => {
+          //   const cdx = corner[0] - center[0];
+          //   const cdy = corner[1] - center[1];
+          //   return [
+          //     center[0] + cdx * scale,
+          //     center[1] + cdy * scale
+          //   ] as [number, number];
+          // });
+          
+          // updateImageBounds(updated);
+
+          const updated: [[number, number], [number, number], [number, number], [number, number]] = currentBounds.map(corner => {
+            const cdx = corner[0] - center[0];
+            const cdy = corner[1] - center[1];
+            return [
+              center[0] + cdx * scale,
+              center[1] + cdy * scale
+            ] as [number, number];
+          }) as [[number, number], [number, number], [number, number], [number, number]];
+
+          updateImageBounds(updated);
+        }
         
-        const origDx = currentBounds[activeCornerIndex][0] - center[0];
-        const origDy = currentBounds[activeCornerIndex][1] - center[1];
-        const origDist = Math.sqrt(origDx * origDx + origDy * origDy);
-        
-        const scale = newDist / origDist;
-        
-        const updated = currentBounds.map(corner => {
-          const cdx = corner[0] - center[0];
-          const cdy = corner[1] - center[1];
-          return [
-            center[0] + cdx * scale,
-            center[1] + cdy * scale
-          ] as [number, number];
-        });
-        
-        updateImageBounds(updated);
-      }
-      
-      if (isRotating) {
-        const center = getCenter(currentBounds);
-        const currentAngle = getAngle(center, current);
-        const rotationAngle = currentAngle - initialAngle;
-        
-        const rotated = currentBounds.map(corner => 
-          rotatePoint(corner, center, rotationAngle)
-        ) as [number, number][];
-        
-        updateImageBounds(rotated);
-        initialAngle = currentAngle;
-      }
-    };
+        if (isRotating) {
+          const center = getCenter(currentBounds);
+          const currentAngle = getAngle(center, current);
+          const rotationAngle = currentAngle - initialAngle;
+          
+          const rotated = currentBounds.map(corner => 
+            rotatePoint(corner, center, rotationAngle)
+          ) as [[number, number], [number, number], [number, number], [number, number]];
+          
+          updateImageBounds(rotated);
+          initialAngle = currentAngle;
+        }
+      };
     
     const onMouseUp = () => {
       if (isDragging || isResizing || isRotating) {
@@ -1030,7 +1074,8 @@ export default function FloorPlanPage() {
       }
       
       if (draggedNodeRef.current && movedPoints?.length) {
-        currentLinesRef.current = movedPoints
+        
+        // currentLinesRef.current = movedPoints
       }
       isDragging = false;
       isResizing = false;
@@ -1041,19 +1086,45 @@ export default function FloorPlanPage() {
         map.getCanvas().style.cursor = '';
       }
     };
+
+    // const onMouseMoveEnd =  () => {
+    //   const { lng, lat } = map.getCenter();
+    //   dispatch(
+    //     setMapState({
+    //       center: [lng, lat],
+    //       zoom: map.getZoom(),
+    //       pitch: map.getPitch(),
+    //       bearing: map.getBearing(),
+    //     })
+    //   );
+    // };
+
+    const updateState = () => {
+      const center = map.getCenter();
+      dispatch(
+        setMapState({
+          center: [center.lng, center.lat],
+          zoom: map.getZoom(),
+          pitch: map.getPitch(),
+          bearing: map.getBearing(),
+        })
+      );
+    };
     
     // Store event listeners for cleanup
     eventListenersRef.current = {
       mousedown: onMouseDown,
       mousemove: onMouseMove,
       mouseup: onMouseUp,
-      mouseout: onMouseUp
+      mouseout: onMouseUp,
+      mousemoveend: updateState
     };
     
     map.on('mousedown', onMouseDown);
     map.on('mousemove', onMouseMove);
     map.on('mouseup', onMouseUp);
     map.on('mouseout', onMouseUp);
+    map.on('moveend', updateState);
     
     // Return cleanup function
     return () => {
@@ -1061,6 +1132,7 @@ export default function FloorPlanPage() {
       map.off('mousemove', onMouseMove);
       map.off('mouseup', onMouseUp);
       map.off('mouseout', onMouseUp);
+      map.off('moveend', updateState);
     };
   }, [handleBuildingClick, updatePreviewLine]);
   
@@ -1071,36 +1143,41 @@ export default function FloorPlanPage() {
     const map = new maplibregl.Map({
       container: mapContainer.current,
       style: "https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json",
-      center: [-74.0179, 40.706],
+      center: center ,
       zoom: 17,
-      pitch: 0,
-      bearing: 0,
-    });
+      pitch: pitch,
+      bearing: bearing,
+    }); 
     
     mapRef.current = map;
     
     if(selectedLocation){
       const { longitude, latitude } = selectedLocation;
       map.setCenter([longitude, latitude]);
-    }else if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (position) => {
-          const { longitude, latitude } = position.coords;
+      // map.setZoom(17);
+    }
+    // else if (navigator.geolocation) {
+    //   navigator.geolocation.getCurrentPosition(
+    //     (position) => {
+    //       const { longitude, latitude } = position.coords;
           
-          // Center the map on user's location
-          map.setCenter([longitude, latitude]);
+    //       // Center the map on user's location
+    //       map.setCenter([longitude, latitude]);
           
-          // Add a marker for current location
-          // new maplibregl.Marker({ color: "blue" })
-          //   .setLngLat([longitude, latitude])
-          //   .setPopup(new maplibregl.Popup().setText("You are here"))
-          //   .addTo(map);
-        },
-        (error) => {
-          console.error("Error getting location:", error);
-        }
-      );
-    } else {
+    //       // Add a marker for current location
+    //       // new maplibregl.Marker({ color: "blue" })
+    //       //   .setLngLat([longitude, latitude])
+    //       //   .setPopup(new maplibregl.Popup().setText("You are here"))
+    //       //   .addTo(map);
+    //     },
+    //     (error) => {
+    //       console.error("Error getting location:", error);
+    //     }
+    //   );
+    // }
+     else {
+      router.push('/')
+      map.setZoom(17);
       console.warn("Geolocation not supported");
     }
 
@@ -1209,14 +1286,14 @@ export default function FloorPlanPage() {
           Drag Nodes
         </button>
 
-        <button
+        {buildings.length > 0 && <button
           onClick={moveToPathFinder}
           className={`w-full px-4 py-2 rounded text-sm font-medium transition-all mb-2 ${
              "bg-gray-700 text-gray-300 hover:bg-gray-600"
           }`}
         >
           Draw Path Lines
-        </button>
+        </button>}
       </div>
     
       {/* Building Drawing Panel */}
@@ -1225,7 +1302,7 @@ export default function FloorPlanPage() {
           position: 'absolute',
           top: '10px',
           right: '10px',
-          background: 'white',
+          background: '#6b6b6bff',
           padding: '15px',
           borderRadius: '8px',
           boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
@@ -1237,19 +1314,19 @@ export default function FloorPlanPage() {
           zIndex: 1000
         }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-        <strong style={{ fontSize: '14px' }}>🏗️ Line-Based Building Drawing</strong>
-        <button 
-        onClick={() => setShowBuildingPanel(!showBuildingPanel)}
-        style={{
-          background: 'none',
-          border: 'none',
-          cursor: 'pointer',
-          fontSize: '16px',
-          padding: '2px 6px'
-        }}
-        >
-        {showBuildingPanel ? '−' : '+'}
-        </button>
+          <strong style={{ fontSize: '14px' }}> Line-Based Building Drawing</strong>
+          <button 
+            onClick={() => setShowBuildingPanel(!showBuildingPanel)}
+            style={{
+              background: 'none',
+              border: 'none',
+              cursor: 'pointer',
+              fontSize: '16px',
+              padding: '2px 6px'
+            }}
+          >
+            {showBuildingPanel ? '−' : '+'}
+          </button>
         </div>
         
         {showBuildingPanel && (
@@ -1257,101 +1334,102 @@ export default function FloorPlanPage() {
           
           {/* Drawing Controls */}
           <div style={{ marginBottom: '12px' }}>
-          <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
-          <button
-          onClick={undoLastPoint}
-          disabled={!currentLineRef.current && currentLinesRef.current.length === 0}
-          style={{
-            flex: 1,
-            padding: '8px',
-            background: (!currentLineRef.current && currentLinesRef.current.length === 0) ? '#e5e7eb' : '#f59e0b',
-            color: (!currentLineRef.current && currentLinesRef.current.length === 0) ? '#9ca3af' : 'white',
-            border: 'none',
-            borderRadius: '6px',
-            cursor: (!currentLineRef.current && currentLinesRef.current.length === 0) ? 'not-allowed' : 'pointer',
-            fontSize: '12px',
-            fontWeight: '500'
-          }}
-          >
-          ↶ Undo
-          </button>
-          <button
-          onClick={finishCurrentLine}
-          disabled={!currentLineRef.current || currentLineRef.current.points.length < 2}
-          style={{
-            flex: 1,
-            padding: '8px',
-            background: (!currentLineRef.current || currentLineRef.current.points.length < 2) ? '#e5e7eb' : '#3b82f6',
-            color: (!currentLineRef.current || currentLineRef.current.points.length < 2) ? '#9ca3af' : 'white',
-            border: 'none',
-            borderRadius: '6px',
-            cursor: (!currentLineRef.current || currentLineRef.current.points.length < 2) ? 'not-allowed' : 'pointer',
-            fontSize: '12px',
-            fontWeight: '600'
-          }}
-          >
-          ✓ Finish Line
-          </button>
-          </div>
-          <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
-          <button
-          onClick={finishBuilding}
-          disabled={currentLines.length === 0}
-          style={{
-            flex: 1,
-            padding: '8px',
-            background: currentLines.length === 0 ? '#e5e7eb' : '#10b981',
-            color: currentLines.length === 0 ? '#9ca3af' : 'white',
-            border: 'none',
-            borderRadius: '6px',
-            cursor: currentLines.length === 0 ? 'not-allowed' : 'pointer',
-            fontSize: '12px',
-            fontWeight: '600'
-          }}
-          >
-          🏗️ Save Building
-          </button>
-          <button
-          onClick={clearDrawing}
-          style={{
-            flex: 1,
-            padding: '8px',
-            background: '#ef4444',
-            color: 'white',
-            border: 'none',
-            borderRadius: '6px',
-            cursor: 'pointer',
-            fontSize: '12px',
-            fontWeight: '500'
-          }}
-          >
-          ✕ Clear
-          </button>
-          </div>
-          
-          <div style={{
-            padding: '10px',
-            background: '#eff6ff',
-            borderRadius: '6px',
-            fontSize: '12px'
-          }}>
-          <div style={{ marginBottom: '4px' }}>
-          <strong>Lines:</strong> {currentLinesRef.current.length}
-          {currentLineRef.current && ` (Current: ${currentLineRef.current.points.length} points)`}
-          </div>
-          {measurement && (
-            <div style={{ color: '#1e40af', fontWeight: '600' }}>
-            {measurement}
+            <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
+              <button
+                onClick={undoLastPoint}
+                disabled={!currentLineRef.current && currentLinesRef.current.length === 0}
+                className="bg-indigo-500 text-white shadow-lg"
+                style={{
+                  flex: 1,
+                  padding: '8px',
+                  background: (!currentLineRef.current && currentLinesRef.current.length === 0) ? '#e5e7eb' : '#f59e0b',
+                  color: (!currentLineRef.current && currentLinesRef.current.length === 0) ? '#9ca3af' : 'white',
+                  border: 'none',
+                  borderRadius: '6px',
+                  cursor: (!currentLineRef.current && currentLinesRef.current.length === 0) ? 'not-allowed' : 'pointer',
+                  fontSize: '12px',
+                  fontWeight: '500'
+                }}
+              >
+              Undo
+              </button>
+              <button
+                onClick={finishCurrentLine}
+                disabled={!currentLineRef.current || currentLineRef.current.points.length < 2}
+                style={{
+                  flex: 1,
+                  padding: '8px',
+                  background: (!currentLineRef.current || currentLineRef.current.points.length < 2) ? '#e5e7eb' : '#3b82f6',
+                  color: (!currentLineRef.current || currentLineRef.current.points.length < 2) ? '#9ca3af' : 'white',
+                  border: 'none',
+                  borderRadius: '6px',
+                  cursor: (!currentLineRef.current || currentLineRef.current.points.length < 2) ? 'not-allowed' : 'pointer',
+                  fontSize: '12px',
+                  fontWeight: '600'
+                }}
+              >
+              Finish Line
+              </button>
             </div>
-          )}
-          <div style={{ marginTop: '6px', color: '#6b7280', fontSize: '11px' }}>
-          <div>• Click to start a line</div>
-          <div>• Click to add points to the line</div>
-          <div>• Click near start point or double-click to close line</div>
-          <div>• Click "Finish Line" to complete current line</div>
-          <div>• Create closed lines to form a building</div>
-          </div>
-          </div>
+            <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
+              <button
+                onClick={finishBuilding}
+                disabled={currentLines.length === 0}
+                style={{
+                  flex: 1,
+                  padding: '8px',
+                  background: currentLines.length === 0 ? '#e5e7eb' : '#10b981',
+                  color: currentLines.length === 0 ? '#9ca3af' : 'white',
+                  border: 'none',
+                  borderRadius: '6px',
+                  cursor: currentLines.length === 0 ? 'not-allowed' : 'pointer',
+                  fontSize: '12px',
+                  fontWeight: '600'
+                }}
+              >
+              Save Building
+              </button>
+              <button
+                onClick={clearDrawing}
+                style={{
+                  flex: 1,
+                  padding: '8px',
+                  background: '#ef4444',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '6px',
+                  cursor: 'pointer',
+                  fontSize: '12px',
+                  fontWeight: '500'
+                }}
+              >
+              Clear
+              </button>
+            </div>
+          
+            <div style={{
+              padding: '10px',
+              background: '#eff6ff',
+              borderRadius: '6px',
+              fontSize: '12px'
+            }}>
+              <div style={{ marginBottom: '4px' }}>
+                <strong>Lines:</strong> {currentLinesRef.current.length}
+                {currentLineRef.current && ` (Current: ${currentLineRef.current.points.length} points)`}
+              </div>
+              {measurement && (
+                <div style={{ color: '#1e40af', fontWeight: '600' }}>
+                  {measurement}
+                </div>
+              )}
+                <div style={{ marginTop: '6px', color: '#6b7280', fontSize: '11px' }}>
+                  <div>• Click to start a line</div>
+                  <div>• Click to add points to the line</div>
+                  <div>• Click near start point or double-click to close line</div>
+                  <div>• Click "Finish Line" to complete current line</div>
+                  <div>• Create closed lines to form a building</div>
+                </div>
+            </div>
           </div>
           
           {/* Buildings List */}
@@ -1376,21 +1454,21 @@ export default function FloorPlanPage() {
               fontSize: '11px'
             }}
             >
-            📋 Copy
+             Copy
             </button>
             <button
-            onClick={clearAllBuildings}
-            style={{
-              padding: '4px 8px',
-              background: '#ef4444',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              fontSize: '11px'
-            }}
+              onClick={clearAllBuildings}
+              style={{
+                padding: '4px 8px',
+                background: '#ef4444',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: 'pointer',
+                fontSize: '11px'
+              }}
             >
-            Clear All
+              Clear All
             </button>
             </div>
           )}
