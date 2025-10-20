@@ -1,5 +1,7 @@
 "use client";
-import React, { useEffect, useRef, useState } from "react";
+import { useAppSelector } from "@/store/hooks";
+import { Map } from "maplibre-gl";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 
 declare global {
   interface Window {
@@ -18,7 +20,7 @@ interface Node {
   color: string;
 }
 
-type PathType = "main" | "sub";
+export type PathType = "main" | "sub";
 
 interface Line {
   id: number;
@@ -53,39 +55,61 @@ interface DrawingShape {
   width?: number;
 }
 
-type ViewMode = "3d" | "map";
-type Mode = "view" | "drawLines" | "dragNodes" | "dragBuildings" | "breakLines" | "moveImage" | "resizeImage" | "drawOnImage";
+type Mode = "view" | "drawLines" | "dragNodes" | "dragBuildings" | "breakLines" | "moveImage" | "resizeImage" | "selectStartNode" | "selectEndNode";
+
+interface ShortestPathResult {
+  path: number[];
+  distance: number;
+  lines: Line[];
+}
+
+// Add these new interfaces
+interface GraphNode {
+  id: number;
+  coordinates: [number, number];
+}
+
+interface GraphEdge {
+  from: number;
+  to: number;
+  weight: number;
+  pathType: PathType;
+  lineId: number;
+}
+
+interface ShortestPathResult {
+  path: number[]; // node IDs
+  distance: number;
+  lines: Line[];
+}
 
 const buildingsData: Building[] = [
-
+  
 ];
 
-export default function App() {
+export default function NavigatorPage() {
+  const { selectedLocation } = useAppSelector((state) => state.location);
+
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<any>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>("map");
   const [mode, setMode] = useState<Mode>("view");
   const [currentPathType, setCurrentPathType] = useState<PathType>("main");
-
+  
   const [lines, setLines] = useState<Line[]>([]);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [currentLine, setCurrentLine] = useState<CurrentLine | null>(null);
   const [mapImage, setMapImage] = useState<MapImage | null>(null);
   const [drawingShapes, setDrawingShapes] = useState<DrawingShape[]>([]);
   const [currentDrawing, setCurrentDrawing] = useState<[number, number][]>([]);
-  const [drawingColor, setDrawingColor] = useState("#FF0000");
-  const [drawingType, setDrawingType] = useState<'line' | 'polygon'>('line');
+  const [startNode, setStartNode] = useState<number | null>(null);
+  const [endNode, setEndNode] = useState<number | null>(null);
+  const [shortestPath, setShortestPath] = useState<ShortestPathResult | null>(null);
+  const [isFindingPath, setIsFindingPath] = useState(false);
   
   const draggedNodeRef = useRef<Node | null>(null);
   const isDraggingNode = useRef(false);
-  const isDraggingImage = useRef(false);
-  const isResizingImage = useRef(false);
-  const resizeCornerRef = useRef<number>(-1);
   const lastClickTime = useRef<number>(0);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const imageDragStart = useRef<{ lng: number; lat: number } | null>(null);
-  const imageOriginalCoords = useRef<[[number, number], [number, number], [number, number], [number, number]] | null>(null);
-
+  
   const linesRef = useRef<Line[]>([]);
   const nodesRef = useRef<Node[]>([]);
   const modeRef = useRef<Mode>(mode);
@@ -94,44 +118,61 @@ export default function App() {
   const mapImageRef = useRef<MapImage | null>(null);
   const drawingShapesRef = useRef<DrawingShape[]>([]);
   const currentDrawingRef = useRef<[number, number][]>([]);
-
+  
+  const startNodeRef = useRef<number | null>(null);
+  const endNodeRef = useRef<number | null>(null);
+  const shortestPathRef = useRef<ShortestPathResult | null>(null);
+  
   const colors = ["#FF9800"];
-
+  
   useEffect(() => {
     linesRef.current = lines;
   }, [lines]);
-
+  
   useEffect(() => {
     nodesRef.current = nodes;
   }, [nodes]);
-
+  
   useEffect(() => {
     currentLineRef.current = currentLine;
   }, [currentLine]);
-
+  
   useEffect(() => {
     modeRef.current = mode;
   }, [mode]);
-
+  
   useEffect(() => {
     currentPathTypeRef.current = currentPathType;
+    finishCurrentLine()
   }, [currentPathType]);
-
+  
   useEffect(() => {
     mapImageRef.current = mapImage;
   }, [mapImage]);
-
+  
   useEffect(() => {
     drawingShapesRef.current = drawingShapes;
   }, [drawingShapes]);
-
+  
   useEffect(() => {
     currentDrawingRef.current = currentDrawing;
   }, [currentDrawing]);
-
+  
   useEffect(() => {
-    if (viewMode !== "map" || !mapContainer.current || mapRef.current) return;
-
+    startNodeRef.current = startNode;
+  }, [startNode]);
+  
+  useEffect(() => {
+    endNodeRef.current = endNode;
+  }, [endNode]);
+  
+  useEffect(() => {
+    shortestPathRef.current = shortestPath;
+  }, [shortestPath]);
+  
+  useEffect(() => {
+    if (!mapContainer.current || mapRef.current) return;
+    
     const script = document.createElement("script");
     script.src = "https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js";
     script.async = true;
@@ -140,22 +181,49 @@ export default function App() {
       link.href = "https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css";
       link.rel = "stylesheet";
       document.head.appendChild(link);
-
+      
       const maplibregl = window.maplibregl;
       const map = new maplibregl.Map({
         container: mapContainer.current,
         style:
-          "https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json",
+        "https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json",
         center: [-74.0179, 40.706],
         zoom: 17,
         pitch: 0,
         bearing: 0,
       });
-
+      
       mapRef.current = map;
-
+      
+      if(selectedLocation){
+        const { longitude, latitude } = selectedLocation;
+        map.setCenter([longitude, latitude]);
+      }else if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          (position) => {
+            const { longitude, latitude } = position.coords;
+            
+            // Center the map on user's location
+            map.setCenter([longitude, latitude]);
+            
+            // Add a marker for current location
+            // new maplibregl.Marker({ color: "blue" })
+            //   .setLngLat([longitude, latitude])
+            //   .setPopup(new maplibregl.Popup().setText("You are here"))
+            //   .addTo(map);
+          },
+          (error) => {
+            console.error("Error getting location:", error);
+          }
+        );
+      } else {
+        console.warn("Geolocation not supported");
+      }
+      
       map.on("load", () => {
         // Add building extrusions
+        const buildingsData: Building[] = JSON.parse(localStorage.getItem("buildings") || "[]");
+        
         buildingsData.forEach((b, i) => {
           const coords = [...b.polygon, b.polygon[0]];
           map.addSource(`building-${i}`, {
@@ -172,17 +240,17 @@ export default function App() {
             paint: {
               "fill-extrusion-color": "#4a90e2",
               "fill-extrusion-height": b.height,
-              "fill-extrusion-opacity": 0.5,
+              "fill-extrusion-opacity": 0.9,
             },
           });
         });
-
+        
         // Main Path Layers (Blue)
         map.addSource("main-lines", {
           type: "geojson",
           data: { type: "FeatureCollection", features: [] },
         });
-
+        
         map.addLayer({
           id: "main-lines-border",
           type: "line",
@@ -193,7 +261,7 @@ export default function App() {
             "line-opacity": 0.8,
           },
         });
-
+        
         map.addLayer({
           id: "main-lines-main",
           type: "line",
@@ -203,7 +271,7 @@ export default function App() {
             "line-width": 8,
           },
         });
-
+        
         map.addLayer({
           id: "main-lines-center",
           type: "line",
@@ -214,13 +282,13 @@ export default function App() {
             "line-opacity": 0.6,
           },
         });
-
+        
         // Sub Path Layers (Green)
         map.addSource("sub-lines", {
           type: "geojson",
           data: { type: "FeatureCollection", features: [] },
         });
-
+        
         map.addLayer({
           id: "sub-lines-border",
           type: "line",
@@ -231,7 +299,7 @@ export default function App() {
             "line-opacity": 0.8,
           },
         });
-
+        
         map.addLayer({
           id: "sub-lines-main",
           type: "line",
@@ -241,7 +309,7 @@ export default function App() {
             "line-width": 6,
           },
         });
-
+        
         map.addLayer({
           id: "sub-lines-center",
           type: "line",
@@ -252,13 +320,13 @@ export default function App() {
             "line-opacity": 0.6,
           },
         });
-
+        
         // Preview line (animated dashed)
         map.addSource("preview-line", {
           type: "geojson",
           data: { type: "FeatureCollection", features: [] },
         });
-
+        
         map.addLayer({
           id: "preview-border",
           type: "line",
@@ -270,7 +338,7 @@ export default function App() {
             "line-dasharray": [2, 2],
           },
         });
-
+        
         map.addLayer({
           id: "preview-main",
           type: "line",
@@ -282,13 +350,13 @@ export default function App() {
             "line-dasharray": [2, 2],
           },
         });
-
+        
         // Nodes
         map.addSource("nodes", {
           type: "geojson",
           data: { type: "FeatureCollection", features: [] },
         });
-
+        
         map.addLayer({
           id: "nodes-glow",
           type: "circle",
@@ -300,7 +368,7 @@ export default function App() {
             "circle-blur": 0.5,
           },
         });
-
+        
         map.addLayer({
           id: "nodes-main",
           type: "circle",
@@ -312,13 +380,13 @@ export default function App() {
             "circle-stroke-color": "#ffffff",
           },
         });
-
+        
         // Line highlight layer
         map.addSource("highlight-line", {
           type: "geojson",
           data: { type: "FeatureCollection", features: [] },
         });
-
+        
         map.addLayer({
           id: "highlight-line-border",
           type: "line",
@@ -329,7 +397,7 @@ export default function App() {
             "line-opacity": 0.3,
           },
         });
-
+        
         map.addLayer({
           id: "highlight-line-main",
           type: "line",
@@ -340,13 +408,13 @@ export default function App() {
             "line-opacity": 0.5,
           },
         });
-
+        
         // Drawing shapes layer
         map.addSource("drawing-shapes", {
           type: "geojson",
           data: { type: "FeatureCollection", features: [] },
         });
-
+        
         map.addLayer({
           id: "drawing-shapes-line",
           type: "line",
@@ -357,7 +425,7 @@ export default function App() {
             "line-width": ["get", "width"],
           },
         });
-
+        
         map.addLayer({
           id: "drawing-shapes-fill",
           type: "fill",
@@ -368,7 +436,7 @@ export default function App() {
             "fill-opacity": 0.3,
           },
         });
-
+        
         map.addLayer({
           id: "drawing-shapes-outline",
           type: "line",
@@ -379,13 +447,13 @@ export default function App() {
             "line-width": 2,
           },
         });
-
+        
         // Preview drawing layer
         map.addSource("preview-drawing", {
           type: "geojson",
           data: { type: "FeatureCollection", features: [] },
         });
-
+        
         map.addLayer({
           id: "preview-drawing-line",
           type: "line",
@@ -396,13 +464,13 @@ export default function App() {
             "line-dasharray": [2, 2],
           },
         });
-
+        
         // Resize handles layer
         map.addSource("resize-handles", {
           type: "geojson",
           data: { type: "FeatureCollection", features: [] },
         });
-
+        
         map.addLayer({
           id: "resize-handles",
           type: "circle",
@@ -414,10 +482,54 @@ export default function App() {
             "circle-stroke-color": "#4285f4",
           },
         });
+        
+        map.addSource("shortest-path", {
+          type: "geojson",
+          data: { type: "FeatureCollection", features: [] },
+        });
+        
+        map.addLayer({
+          id: "shortest-path-line",
+          type: "line",
+          source: "shortest-path",
+          paint: {
+            "line-color": "#FF00FF",
+            "line-width": 6,
+            "line-opacity": 0.8,
+            "line-dasharray": [1, 0], // Solid line
+          },
+        });
       });
 
       map.on("click", (e: any) => {
         const currentMode = modeRef.current;
+        
+
+        if (currentMode === "selectStartNode" || currentMode === "selectEndNode") {
+          const clickedNode = findNodeAtPoint(e.lngLat, nodesRef.current);
+          if (clickedNode) {
+            if (currentMode === "selectStartNode") {
+              setStartNode(clickedNode.id);
+              setMode("selectEndNode"); // Automatically switch to end node selection
+            } else {
+              setEndNode(clickedNode.id);
+              setMode("view");
+              
+              // Calculate shortest path
+              if (startNodeRef.current && clickedNode.id) {
+                setIsFindingPath(true);
+                setTimeout(() => {
+                  const pathResult = findShortestPath(startNodeRef.current!, clickedNode.id!);
+                  setShortestPath(pathResult);
+                  shortestPathRef.current = pathResult;
+                  highlightShortestPath(map, pathResult);
+                  setIsFindingPath(false);
+                }, 0);
+              }
+            }
+          }
+          return;
+        }
         
         if (currentMode === "breakLines") {
           const clickedLineInfo = findLineAtPoint(e.lngLat, linesRef.current);
@@ -429,11 +541,11 @@ export default function App() {
         }
         
         if (currentMode !== "drawLines") return;
-
+        
         const now = Date.now();
         const isDoubleClick = now - lastClickTime.current < 300;
         lastClickTime.current = now;
-
+        
         if (isDoubleClick && currentLineRef.current) {
           setCurrentLine(null);
           currentLineRef.current = null;
@@ -441,18 +553,18 @@ export default function App() {
           updateHighlightLine(map, null);
           return;
         }
-
+        
         const clickedNode = findNodeAtPoint(e.lngLat, nodesRef.current);
         const clickedLineInfo = findLineAtPoint(e.lngLat, linesRef.current);
-
+        
         if (currentLineRef.current && (clickedLineInfo || (clickedNode && clickedNode.id !== currentLineRef.current.start))) {
-          let endNode: Node;
           
-          if (clickedNode && clickedNode.id !== currentLineRef.current.start) {
+          let endNode: Node;
+          // console.log({clickedNode,clickedLineInfo,currentLineRef:currentLineRef.current}, clickedNode.id , currentLineRef.current.start,"sdfnsdjkf");
+          if (clickedNode && clickedNode?.id ) {
             endNode = clickedNode;
           } else if (clickedLineInfo) {
-            const { line, closestPoint, segmentIndex } = clickedLineInfo;
-            
+            const { line, closestPoint, segmentIndex } = clickedLineInfo;            
             endNode = {
               id: Date.now(),
               coordinates: [closestPoint[0], closestPoint[1]],
@@ -475,6 +587,35 @@ export default function App() {
             return;
           }
           
+          // if (clickedNode && clickedNode.id !== currentLineRef.current.start) {
+          //   endNode = clickedNode;
+          //   console.log("here1");
+          // } else if (clickedLineInfo) {
+          //   const { line, closestPoint, segmentIndex } = clickedLineInfo;
+          //   console.log("here2");
+          
+          //   endNode = {
+          //     id: Date.now(),
+          //     coordinates: [closestPoint[0], closestPoint[1]],
+          //     color: colors[nodesRef.current.length % colors.length],
+          //   };
+          
+          //   const splitLines = splitLineAtPoint(line, closestPoint, segmentIndex, endNode.id);
+          //   const updatedLines = linesRef.current.filter(l => l.id !== line.id);
+          //   updatedLines.push(...splitLines);
+          //   const updatedNodes = [...nodesRef.current, endNode];
+          
+          //   setNodes(updatedNodes);
+          //   nodesRef.current = updatedNodes;
+          //   setLines(updatedLines);
+          //   linesRef.current = updatedLines;
+          
+          //   updateNodesOnMap(map, updatedNodes);
+          //   updateLinesOnMap(map, updatedLines);
+          // } else {
+            //   return;
+          // }
+          
           const finalLine: Line = {
             id: Date.now(),
             points: [
@@ -493,7 +634,7 @@ export default function App() {
           updateLinesOnMap(map, updatedLines);
           return;
         }
-
+        
         if (clickedLineInfo && !clickedNode && !currentLineRef.current) {
           const { line, closestPoint, segmentIndex } = clickedLineInfo;
           
@@ -530,9 +671,10 @@ export default function App() {
           updateHighlightLine(map, line.points);
           return;
         }
-
+        
         if (clickedNode) {
           if (!currentLineRef.current) {
+            
             const newCurrentLine = {
               start: clickedNode.id,
               points: [clickedNode.coordinates],
@@ -570,7 +712,7 @@ export default function App() {
           setNodes(updatedNodes);
           nodesRef.current = updatedNodes;
           updateNodesOnMap(map, updatedNodes);
-
+          
           if (!currentLineRef.current) {
             const newCurrentLine = {
               start: newNode.id,
@@ -594,7 +736,7 @@ export default function App() {
             const updatedLines = [...linesRef.current, newLine];
             setLines(updatedLines);
             linesRef.current = updatedLines;
-
+            
             const updatedCurrentLine = {
               ...currentLineRef.current,
               points: [...currentLineRef.current.points, newNode.coordinates],
@@ -606,68 +748,66 @@ export default function App() {
           }
         }
       });
-
       
-
-      map.on("mousemove", (e: any) => {
-        const currentMode = modeRef.current;
-        
+      map.on("mousemove", (e: any) => {    
+        const currentMode = modeRef.current;    
+        if (currentMode === "dragNodes" && isDraggingNode.current) {
+          highlightShortestPath(map, null);
+        }
         if (currentMode === "drawLines" && !currentLineRef.current) {
           const lineInfo = findLineAtPoint(e.lngLat, linesRef.current);
           map.getCanvas().style.cursor = lineInfo ? "crosshair" : "";
         }
-
+        
         if (currentMode === "breakLines") {
           const lineInfo = findLineAtPoint(e.lngLat, linesRef.current);
           map.getCanvas().style.cursor = lineInfo ? "no-drop" : "";
         }
-
-
+        
+        
         if (isDraggingNode.current && draggedNodeRef.current) {
           const updatedNodes = nodesRef.current.map((n) =>
             n.id === draggedNodeRef.current!.id
-              ? {
-                  ...n,
-                  coordinates: [e.lngLat.lng, e.lngLat.lat] as [number, number],
-                }
-              : n
-          );
-          setNodes(updatedNodes);
-          nodesRef.current = updatedNodes;
-
-          const updatedLines = linesRef.current.map((l) => {
-            const updatedPoints = l.points.map((p, idx) => {
-              if (
-                (idx === 0 && l.startNode === draggedNodeRef.current!.id) ||
-                (idx === l.points.length - 1 &&
-                  l.endNode === draggedNodeRef.current!.id)
+          ? {
+            ...n,
+            coordinates: [e.lngLat.lng, e.lngLat.lat] as [number, number],
+          }
+          : n
+        );
+        setNodes(updatedNodes);
+        nodesRef.current = updatedNodes;
+        
+        const updatedLines = linesRef.current.map((l) => {
+          const updatedPoints = l.points.map((p, idx) => {
+            if (
+              (idx === 0 && l.startNode === draggedNodeRef.current!.id) ||
+              (idx === l.points.length - 1 &&
+                l.endNode === draggedNodeRef.current!.id)
               )
-                return [e.lngLat.lng, e.lngLat.lat] as [number, number];
+              return [e.lngLat.lng, e.lngLat.lat] as [number, number];
               return p;
             });
             return { ...l, points: updatedPoints };
           });
-
+          
           setLines(updatedLines);
           linesRef.current = updatedLines;
           updateNodesOnMap(map, updatedNodes);
           updateLinesOnMap(map, updatedLines);
         }
-
         
-
-        if (mode === "dragNodes") {
+        
+        if (currentMode === "dragNodes") {
           const node = findNodeAtPoint(e.lngLat, nodesRef.current);
-          console.log(nodesRef.current);
           map.getCanvas().style.cursor = node ? "pointer" : "";
         }
       });
-
+      
       map.on("mousedown", (e: any) => {
         const currentMode = modeRef.current;
-        console.log(currentMode);
         
         if (currentMode === "dragNodes") {
+          const threshold = getDynamicThreshold(map, 10);
           const clickedNode = findNodeAtPoint(e.lngLat, nodesRef.current);
           if (clickedNode) {
             draggedNodeRef.current = clickedNode;
@@ -677,8 +817,9 @@ export default function App() {
           }
         }
       });
-
+      
       map.on("mouseup", () => {
+        const currentMode = modeRef.current;
         if (isDraggingNode.current) {
           isDraggingNode.current = false;
           draggedNodeRef.current = null;
@@ -686,70 +827,40 @@ export default function App() {
             mapRef.current.getCanvas().style.cursor = "";
             mapRef.current.dragPan.enable();
           }
+
+          if(startNodeRef.current && endNodeRef.current && currentMode === "dragNodes"){
+            const pathResult = findShortestPath(startNodeRef.current!, endNodeRef.current);
+            setShortestPath(pathResult);
+            shortestPathRef.current = pathResult;
+            highlightShortestPath(map, pathResult);
+            setIsFindingPath(false);
+          }
         }
       });
     };
     document.head.appendChild(script);
-
+    
     return () => {
       if (mapRef.current) {
         mapRef.current.remove();
         mapRef.current = null;
       }
     };
-  }, [viewMode]);
+  }, [selectedLocation]);
 
-
-  function updateDrawingShapes(map: any, shapes: DrawingShape[]) {
-    const features = shapes.map(shape => ({
-      type: 'Feature',
-      geometry: {
-        type: shape.type === 'line' ? 'LineString' : 'Polygon',
-        coordinates: shape.type === 'polygon' ? [shape.coordinates] : shape.coordinates,
-      },
-      properties: {
-        color: shape.color,
-        width: shape.width || 3,
-        shapeType: shape.type,
-      },
-    }));
-
-    map.getSource('drawing-shapes')?.setData({
-      type: 'FeatureCollection',
-      features,
-    });
-  }
-
-  function updatePreviewDrawing(
-    map: any,
-    points: [number, number][],
-    color: string,
-    type: 'line' | 'polygon'
-  ) {
-    if (points.length === 0) {
-      map.getSource('preview-drawing')?.setData({
-        type: 'FeatureCollection',
-        features: [],
-      });
-      return;
-    }
-
-    map.getSource('preview-drawing')?.setData({
-      type: 'FeatureCollection',
-      features: [{
-        type: 'Feature',
-        geometry: {
-          type: 'LineString',
-          coordinates: points,
-        },
-        properties: {
-          color,
-          width: 3,
-        },
-      }],
-    });
-  }
-
+  // Dynamic threshold based on screen pixels and zoom level
+    const getDynamicThreshold = useCallback((map: Map, pixelThreshold: number = 10): number => {
+      const center = map.getCenter();
+      const zoom = map.getZoom();
+      
+      const metersPerPixel = 40075016.686 * Math.abs(Math.cos(center.lat * Math.PI / 180)) / Math.pow(2, zoom + 8);
+      const degreesPerMeter = 1 / 111320;
+      const thresholdInMeters = pixelThreshold * metersPerPixel;
+      const thresholdInDegrees = thresholdInMeters * degreesPerMeter;
+      
+      return thresholdInDegrees;
+    }, []);
+  
   function findNodeAtPoint(
     lngLat: { lng: number; lat: number },
     nodesList: Node[]
@@ -758,10 +869,10 @@ export default function App() {
     return nodesList.find(
       (n) =>
         Math.abs(n.coordinates[0] - lngLat.lng) < t &&
-        Math.abs(n.coordinates[1] - lngLat.lat) < t
+      Math.abs(n.coordinates[1] - lngLat.lat) < t
     );
   }
-
+  
   function findLineAtPoint(
     lngLat: { lng: number; lat: number },
     linesList: Line[]
@@ -772,7 +883,7 @@ export default function App() {
     let closestPoint: [number, number] | undefined;
     let closestSegmentIndex = -1;
     let minDistance = tolerance;
-
+    
     linesList.forEach(line => {
       for (let i = 0; i < line.points.length - 1; i++) {
         const p1 = line.points[i];
@@ -816,7 +927,7 @@ export default function App() {
         }
       }
     });
-
+    
     if (closestLine && closestPoint) {
       return {
         line: closestLine,
@@ -827,7 +938,7 @@ export default function App() {
     
     return undefined;
   }
-
+  
   function splitLineAtPoint(
     line: Line, 
     splitPoint: [number, number], 
@@ -843,7 +954,7 @@ export default function App() {
       splitPoint,
       ...line.points.slice(segmentIndex + 1)
     ];
-
+    
     const firstSegment: Line = {
       id: Date.now(),
       points: firstSegmentPoints,
@@ -851,7 +962,7 @@ export default function App() {
       endNode: newNodeId,
       pathType: line.pathType
     };
-
+    
     const secondSegment: Line = {
       id: Date.now() + 1,
       points: secondSegmentPoints,
@@ -859,10 +970,10 @@ export default function App() {
       endNode: line.endNode,
       pathType: line.pathType
     };
-
+    
     return [firstSegment, secondSegment];
   }
-
+  
   function breakLineAtPoint(
     line: Line,
     breakPoint: [number, number],
@@ -888,7 +999,7 @@ export default function App() {
     updateNodesOnMap(map, updatedNodes);
     updateLinesOnMap(map, updatedLines);
   }
-
+  
   function finishCurrentLine() {
     setCurrentLine(null);
     currentLineRef.current = null;
@@ -897,34 +1008,34 @@ export default function App() {
       updateHighlightLine(mapRef.current, null);
     }
   }
-
+  
   function updateLinesOnMap(map: any, list: Line[]) {
     const mainLines = list.filter((l) => l.pathType === "main");
     const subLines = list.filter((l) => l.pathType === "sub");
-
+    
     const mainFeatures = mainLines.map((l) => ({
       type: "Feature",
       geometry: { type: "LineString", coordinates: l.points },
       properties: { id: l.id },
     }));
-
+    
     const subFeatures = subLines.map((l) => ({
       type: "Feature",
       geometry: { type: "LineString", coordinates: l.points },
       properties: { id: l.id },
     }));
-
+    
     map.getSource("main-lines")?.setData({
       type: "FeatureCollection",
       features: mainFeatures,
     });
-
+    
     map.getSource("sub-lines")?.setData({
       type: "FeatureCollection",
       features: subFeatures,
     });
   }
-
+  
   function updatePreviewLine(
     map: any,
     points: [number, number][] | null,
@@ -937,7 +1048,7 @@ export default function App() {
       });
       return;
     }
-
+    
     const isMain = pathType === "main";
     map.getSource("preview-line")?.setData({
       type: "FeatureCollection",
@@ -955,7 +1066,7 @@ export default function App() {
       ],
     });
   }
-
+  
   function updateHighlightLine(
     map: any,
     points: [number, number][] | null
@@ -967,7 +1078,7 @@ export default function App() {
       });
       return;
     }
-
+    
     map.getSource("highlight-line")?.setData({
       type: "FeatureCollection",
       features: [
@@ -978,7 +1089,7 @@ export default function App() {
       ],
     });
   }
-
+  
   function updateNodesOnMap(map: any, list: Node[]) {
     const features = list.map((n) => ({
       type: "Feature",
@@ -990,143 +1101,343 @@ export default function App() {
       features,
     });
   }
-
-
-  const mainPathCount = lines.filter((l) => l.pathType === "main").length;
-  const subPathCount = lines.filter((l) => l.pathType === "sub").length;
-
-  return (
-    <div className="w-full h-screen bg-gray-900">
-     
+  
+  function buildGraph(): Map<number, GraphEdge[]> {
+    const graph = new Map<number, GraphEdge[]>();
+    
+    // Initialize graph with all nodes
+    nodesRef.current.forEach(node => {
+      graph.set(node.id, []);
+    });
+    
+    // Add edges from lines
+    linesRef.current.forEach(line => {
+      // Calculate distance between points (you can use Haversine for real distances)
+      const distance = calculateLineDistance(line.points);
       
-      <div className="absolute top-4 left-4 z-10 flex flex-col gap-2 bg-gray-800/95 backdrop-blur-sm p-3 rounded-lg shadow-xl border border-gray-700 max-h-[calc(100vh-2rem)] overflow-y-auto">
-        <div className="text-white font-bold mb-2 flex items-center gap-2">
-          <svg
-            className="w-5 h-5"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M4 6h16M4 12h16M4 18h16"
-            />
-          </svg>
-          Tools
-        </div>
-
-
-        {/* Road Tools Section */}
-        <div className="border-t border-gray-600 pt-2">
-          <div className="text-xs text-gray-400 font-semibold uppercase mb-2">
-            🛣️ Road Tools
-          </div>
+      // Apply priority: main paths have lower weight (higher priority)
+      const weight = line.pathType === "main" ? distance * 0.8 : distance;
+      
+      // Add edge from start to end
+      if (!graph.has(line.startNode)) {
+        graph.set(line.startNode, []);
+      }
+      graph.get(line.startNode)!.push({
+        from: line.startNode,
+        to: line.endNode,
+        weight,
+        pathType: line.pathType,
+        lineId: line.id
+      });
+      
+      // Add edge from end to start (undirected graph)
+      if (!graph.has(line.endNode)) {
+        graph.set(line.endNode, []);
+      }
+      graph.get(line.endNode)!.push({
+        from: line.endNode,
+        to: line.startNode,
+        weight,
+        pathType: line.pathType,
+        lineId: line.id
+      });
+    });
+    
+    return graph;
+  }
+  
+  function calculateLineDistance(points: [number, number][]): number {
+    let totalDistance = 0;
+    for (let i = 0; i < points.length - 1; i++) {
+      const [lng1, lat1] = points[i];
+      const [lng2, lat2] = points[i + 1];
+      // Simple Euclidean distance (for small areas, good enough)
+      const dx = lng2 - lng1;
+      const dy = lat2 - lat1;
+      totalDistance += Math.sqrt(dx * dx + dy * dy);
+    }
+    return totalDistance;
+  }
+  
+  function findShortestPath(startId: number, endId: number): ShortestPathResult | null {
+    const graph = buildGraph();
+    
+    
+    if (!graph.has(startId) || !graph.has(endId)) {
+      return null;
+    }
+    
+    // Priority queue using a min-heap (simulated with array and sorting)
+    const distances = new Map<number, number>();
+    const previous = new Map<number, { node: number; edge: GraphEdge | null }>();
+    const visited = new Set<number>();
+    
+    // Initialize distances
+    graph.forEach((_, nodeId) => {
+      distances.set(nodeId, Infinity);
+    });
+    distances.set(startId, 0);
+    
+    const unvisited = Array.from(graph.keys());
+    
+    while (unvisited.length > 0) {
+      // Get node with smallest distance
+      unvisited.sort((a, b) => distances.get(a)! - distances.get(b)!);
+      const currentNode = unvisited.shift()!;
+      
+      if (currentNode === endId) {
+        break;
+      }
+      
+      if (distances.get(currentNode) === Infinity) {
+        break;
+      }
+      
+      visited.add(currentNode);
+      
+      // Update distances to neighbors
+      const edges = graph.get(currentNode) || [];
+      for (const edge of edges) {
+        if (visited.has(edge.to)) continue;
         
-          <button
-            onClick={() => {
-              setMode("drawLines");
-              setCurrentLine(null);
-              if (mapRef.current) {
-                updateHighlightLine(mapRef.current, null); 
-              }
-            }}
-            className={`w-full px-4 py-2 rounded text-sm font-medium transition-all mb-2 ${
-              mode === "drawLines"
+        const newDistance = distances.get(currentNode)! + edge.weight;
+        if (newDistance < distances.get(edge.to)!) {
+          distances.set(edge.to, newDistance);
+          previous.set(edge.to, { node: currentNode, edge });
+        }
+      }
+    }
+    
+    // Reconstruct path
+    if (distances.get(endId) === Infinity) {
+      return null;
+    }
+    
+    const path: number[] = [];
+    const pathLines: Line[] = [];
+    let current: number | undefined = endId;
+    
+    
+    while (current !== undefined) {
+      path.unshift(current);
+      const prev = previous.get(current);
+      if (prev && prev.edge) {
+        // Find the line for this edge
+        const line = linesRef.current.find(l => l.id === prev.edge.lineId);
+        if (line) {
+          pathLines.unshift(line);
+        }
+      }
+      current = prev?.node;
+    }
+    
+    return {
+      path,
+      distance: distances.get(endId)!,
+      lines: pathLines
+    };
+  }
+  
+  // Function to highlight the shortest path on the map
+  function highlightShortestPath(map: any, pathResult: ShortestPathResult | null) {
+    if (!pathResult) {
+      map.getSource("shortest-path")?.setData({
+        type: "FeatureCollection",
+        features: [],
+      });
+      return;
+    }
+    
+    // Create a continuous line from the path
+    const pathCoordinates: [number, number][] = [];
+    
+    pathResult.path.forEach(nodeId => {
+      const node = nodesRef.current.find(n => n.id === nodeId);
+      if (node) {
+        pathCoordinates.push(node.coordinates);
+      }
+    });
+    
+    // console.log(pathCoordinates,"pathCoordinates");
+    map.getSource("shortest-path")?.setData({
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          geometry: {
+            type: "LineString",
+            coordinates: pathCoordinates
+          },
+          properties: {}
+        }
+      ],
+    });
+  }
+  
+  // Function to clear the current path finding
+  function clearPathFinding() {
+    setStartNode(null);
+    setEndNode(null);
+    setShortestPath(null);
+    startNodeRef.current = null;
+    endNodeRef.current = null;
+    shortestPathRef.current = null;
+    if (mapRef.current) {
+      highlightShortestPath(mapRef.current, null);
+    }
+  }
+  
+  function startPathFinding() {
+    clearPathFinding();
+    setMode("selectStartNode");
+  }
+  
+    return (
+      <div className="w-full h-screen bg-gray-900">
+      
+        <div className="absolute top-4 left-4 z-10 flex flex-col gap-2 bg-gray-800/95 backdrop-blur-sm p-3 rounded-lg shadow-xl border border-gray-700 max-h-[calc(100vh-2rem)] overflow-y-auto">
+         
+          <div className="">
+        
+            <button
+              onClick={() => {
+                setMode("drawLines");
+                setCurrentLine(null);
+                if (mapRef.current) {
+                  updateHighlightLine(mapRef.current, null); 
+                }
+              }}
+              className={`w-full px-4 py-2 rounded text-sm font-medium transition-all mb-2 ${
+                mode === "drawLines"
                 ? "bg-blue-500 text-white shadow-lg"
                 : "bg-gray-700 text-gray-300 hover:bg-gray-600"
-            }`}
-          >
-            ✏️ Draw Roads
-          </button>
-
-          {mode === "drawLines" && (
-            <div className="ml-2 flex flex-col gap-2 border-l-2 border-gray-600 pl-3 mb-2">
-              <div className="text-xs text-gray-400 font-semibold uppercase">
-                Path Type
-              </div>
-              <button
-                onClick={() => setCurrentPathType("main")} 
-                className={`px-3 py-2 rounded text-xs font-medium transition-all ${
-                  currentPathType === "main"
+              }`}
+            >
+             Draw Roads
+            </button>
+        
+            {mode === "drawLines" && (
+              <div className="ml-2 flex flex-col gap-2  pl-3 mb-2"> 
+                <button
+                  onClick={() => {
+                    setCurrentPathType("main")
+                  }} 
+                  className={`px-3 py-2 rounded text-xs font-medium transition-all ${
+                    currentPathType === "main"
                     ? "bg-blue-500 text-white shadow-lg"
                     : "bg-gray-700 text-gray-300 hover:bg-gray-600"
-                }`}
-              >
-                🔵 Main Path
-              </button>
-              <button
-                onClick={() => setCurrentPathType("sub")}
-                className={`px-3 py-2 rounded text-xs font-medium transition-all ${
-                  currentPathType === "sub"
+                  }`}
+                >
+                  Main Path
+                </button>
+                <button
+                  onClick={() => setCurrentPathType("sub")}
+                  className={`px-3 py-2 rounded text-xs font-medium transition-all ${
+                    currentPathType === "sub"
                     ? "bg-green-500 text-white shadow-lg"
                     : "bg-gray-700 text-gray-300 hover:bg-gray-600"
-                }`}
-              >
-                🟢 Sub Path
-              </button>
-            </div>
-          )}
-
-          <button
-            onClick={() => setMode("dragNodes")}
-            className={`w-full px-4 py-2 rounded text-sm font-medium transition-all mb-2 ${
-              mode === "dragNodes"
+                  }`}
+                >
+                Sub Path
+                </button>
+              </div>
+            )}
+            
+            <button
+              onClick={() => setMode("dragNodes")}
+              className={`w-full px-4 py-2 rounded text-sm font-medium transition-all mb-2 ${
+                mode === "dragNodes"
                 ? "bg-yellow-500 text-white shadow-lg"
                 : "bg-gray-700 text-gray-300 hover:bg-gray-600"
-            }`}
-          >
-            🎯 Drag Nodes
-          </button>
-        </div>
-
-        {currentLine && (
-          <button
+              }`}
+            >
+              Drag Nodes
+            </button>
+          </div>
+      
+          {currentLine && (
+            <button
             onClick={finishCurrentLine}
             className="px-4 py-2 rounded text-sm font-medium bg-orange-500 text-white hover:bg-orange-600 transition-all"
+            >
+              Cancel Line
+            </button>
+          )}
+      
+          {linesRef.current && linesRef.current?.length > 1 && (<button
+            onClick={startPathFinding}
+            disabled={isFindingPath}
+            className={`w-full px-4 py-2 rounded text-sm font-medium transition-all mb-2 ${
+              isFindingPath
+              ? "bg-gray-600 text-gray-400 cursor-not-allowed"
+              : "bg-purple-500 text-white hover:bg-purple-600"
+            }`}
           >
-            ❌ Cancel Line
-          </button>
-        )}
+              {isFindingPath ? "Finding Path..." : " Find Shortest Path"}
+          </button>)}
 
-        <div className="border-t border-gray-600 my-2"></div>
-        <button
-          onClick={() => {
-            setLines([]);
-            setNodes([]);
-            setCurrentLine(null);
-            setMapImage(null);
-            setDrawingShapes([]);
-            setCurrentDrawing([]);
-            linesRef.current = [];
-            nodesRef.current = [];
-            currentLineRef.current = null;
-            mapImageRef.current = null;
-            drawingShapesRef.current = [];
-            currentDrawingRef.current = [];
-            if (mapRef.current) {
-              updateLinesOnMap(mapRef.current, []);
-              updateNodesOnMap(mapRef.current, []);
-              updatePreviewLine(mapRef.current, null);
-              updateHighlightLine(mapRef.current, null);
-            
-            }
-          }}
-          className="px-4 py-2 rounded text-sm font-medium bg-red-600 text-white hover:bg-red-700 transition-all"
-        >
-          🗑️ Clear All
-        </button>
-
-        {/* Stats */}
-        <div className="text-xs text-gray-400 mt-2 space-y-1">
-          <div>Roads: {lines.length}</div>
-          <div>Nodes: {nodes.length}</div>
-          {mapImage && <div>✓ Image loaded</div>}
-          {drawingShapes.length > 0 && <div>Drawings: {drawingShapes.length}</div>}
+          {(mode === "selectStartNode" || mode === "selectEndNode") && (
+            <div className="text-xs text-yellow-400 bg-yellow-900 p-2 rounded">
+              {mode === "selectStartNode" ? "Click on a node to set START point" : "Click on a node to set END point"}
+            </div>
+          )}
+      
+          <div className="border-t border-gray-600 my-2"></div>
+          <button
+            onClick={() => {
+              // setLines([]);
+              // setNodes([]);
+              // setCurrentLine(null);
+              // setMapImage(null);
+              // setDrawingShapes([]);
+              // setCurrentDrawing([]);
+              // linesRef.current = [];
+              // nodesRef.current = [];
+              // currentLineRef.current = null;
+              // mapImageRef.current = null;
+              // drawingShapesRef.current = [];
+              // currentDrawingRef.current = [];
+              // if (mapRef.current) {
+              //   updateLinesOnMap(mapRef.current, []);
+              //   updateNodesOnMap(mapRef.current, []);
+              //   updatePreviewLine(mapRef.current, null);
+              //   updateHighlightLine(mapRef.current, null);
+              
+              // }
+              
+              setLines([]);
+              setNodes([]);
+              setCurrentLine(null);
+              setMapImage(null);
+              setDrawingShapes([]);
+              setCurrentDrawing([]);
+              setStartNode(null);
+              setEndNode(null);
+              setShortestPath(null);
+              linesRef.current = [];
+              nodesRef.current = [];
+              currentLineRef.current = null;
+              mapImageRef.current = null;
+              drawingShapesRef.current = [];
+              currentDrawingRef.current = [];
+              startNodeRef.current = null;
+              endNodeRef.current = null;
+              shortestPathRef.current = null;
+              if (mapRef.current) {
+                updateLinesOnMap(mapRef.current, []);
+                updateNodesOnMap(mapRef.current, []);
+                updatePreviewLine(mapRef.current, null);
+                updateHighlightLine(mapRef.current, null);
+                highlightShortestPath(mapRef.current, null);
+              }
+            }}
+            className="px-4 py-2 rounded text-sm font-medium bg-red-600 text-white hover:bg-red-700 transition-all"
+          >
+            Clear All
+          </button> 
         </div>
+
+        <div ref={mapContainer} className="w-full h-full" />
       </div>
-      <div ref={mapContainer} className="w-full h-full" />
-    </div>
-  );
+    );
 }

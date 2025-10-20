@@ -6,7 +6,6 @@ export function findNodeAtPoint(
   threshold : number
 ): [number, number] | undefined {
   const t = threshold;
-  console.log(nodesList);
   return nodesList.find(
     ([lng, lat]) =>
       Math.abs(lng - lngLat.lng) < t &&
